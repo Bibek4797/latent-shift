@@ -1,106 +1,213 @@
-# LatentShift: Zero-Shot LLM Alignment via Real-Time Activation Steering
+<div align="center">
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+# 🧠 LatentShift
+### Zero-Shot LLM Alignment via Real-Time Activation Steering
 
-**LatentShift** is a production-grade, highly modular Python framework for performing **Representation Engineering (Activation Steering)** on open-source causal language models (e.g., Qwen-2.5, Llama-3, Mistral) without modifying model weights or performing expensive reinforcement learning (RLHF/DPO). 
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![HuggingFace](https://img.shields.io/badge/Hugging%20Face-Transformers-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-App-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-By extracting latent concept vectors from intermediate hidden states and dynamically injecting them into the residual stream via PyTorch forward hooks, LatentShift achieves real-time, zero-shot behavior control (e.g., safety enforcement, toxicity suppression, formal style shifting).
+*A production-grade, highly modular Representation Engineering (RepEng) framework for real-time, inference-time activation steering on open-source Causal LLMs (Llama-3, Qwen-2.5, Mistral).*
+
+</div>
 
 ---
 
-## 📖 Theoretical Background
+## 📌 Overview
 
-Traditional LLM alignment methods (SFT, RLHF, DPO) rely on gradient descent to modify millions or billions of parameters. This process is:
-1. **Computationally intensive**: Requires massive hardware resources.
-2. **Brittle**: Often results in "alignment tax," reducing the model's general reasoning capabilities.
-3. **Static**: Once weights are updated, the alignment behavior is locked in.
+**LatentShift** enables precise, dynamic behavioral alignment of Large Language Models (LLMs) **without weight updates, parameter fine-tuning (SFT), or RLHF/DPO**. 
 
-**Representation Engineering (RepEng)** views alignment through the lens of internal activations rather than model weights. As information propagates through the transformer block, the model builds structured latent representations. 
+By capturing concept directions in the model's internal residual stream and dynamically injecting them via PyTorch forward hooks during autoregressive decoding, LatentShift achieves zero-shot steering over safety protocols, toxicity suppression, and stylistic registers.
 
-### Latent Space Intervention
+```
+                  ┌──────────────────────────────────────────────┐
+                  │          Contrastive Prompt Pairs            │
+                  │  Positive (Safe/Formal) vs Negative (Toxic)  │
+                  └──────────────────────┬───────────────────────┘
+                                         │
+                                         ▼
+                  ┌──────────────────────────────────────────────┐
+                  │    Hidden State Activation Extraction        │
+                  │   Extract at Last Token Position: h_pos, h_neg│
+                  └──────────────────────┬───────────────────────┘
+                                         │
+                                         ▼
+                  ┌──────────────────────────────────────────────┐
+                  │     Concept Vector Engine (Compute v)        │
+                  │  Mean Difference  or  Principal Component 1  │
+                  └──────────────────────┬───────────────────────┘
+                                         │
+                                         ▼
+                  ┌──────────────────────────────────────────────┐
+                  │   Real-Time Residual Stream Hook Injection   │
+                  │       h_steered = h_orig + α · v_concept     │
+                  └──────────────────────────────────────────────┘
+```
 
-1. **Extraction**: We run the model on contrasting prompt pairs (e.g., $P_{\text{positive}}$ vs $P_{\text{negative}}$) representing a target concept.
-2. **Concept Vector Computation**: We capture the final token's hidden states $h_{\text{pos}}$ and $h_{\text{neg}}$ at target layers. We isolate the concept direction using:
-   - **Mean Difference**: $v_{\text{concept}} = \bar{h}_{\text{pos}} - \bar{h}_{\text{neg}}$
-   - **Principal Component Analysis (PCA)**: Fitting the first principal component of the difference matrix $D = h_{\text{pos}} - h_{\text{neg}}$.
-3. **Dynamic Steering**: During autoregressive generation, we inject the concept vector into the residual stream at target layer $L$:
-   $$h_{\text{steered}}^{(L)} = h_{\text{original}}^{(L)} + \alpha \cdot v_{\text{concept}}^{(L)}$$
-   where $\alpha$ is a scalar multiplier that controls steering intensity. Positive values reinforce the concept, and negative values suppress it.
+---
+
+## ✨ Key Features
+
+- 🚀 **Zero Parameter Modification**: Achieves real-time behavioral alignment without updating a single weight parameter.
+- 🎯 **Dual Vector Engines**: Supports both **Mean Difference** ($\bar{h}_{\text{pos}} - \bar{h}_{\text{neg}}$) and **Principal Component Analysis (PCA)** extraction with automatic sign alignment.
+- 🔌 **Dynamic PyTorch Hook Management**: Safely attaches forward hooks during generation and guarantees removal under all execution paths (`try...finally`) to prevent GPU memory leaks.
+- 📊 **Perplexity & Similarity Metrics**: Computes cross-entropy perplexity (PPL) to verify sequence fluency alongside vector space cosine similarity shifts.
+- 🖥️ **Interactive Web UI Dashboard**: Includes a full-featured Streamlit application with side-by-side comparative cards, live parameter adjustment ($\alpha \in [-10, 10]$), and layer-wise activation trajectory visualizations.
+- ⚡ **Zero-GPU Mock Engine**: Features an instant built-in simulated model mode (`Mock-Model-1.5B`) allowing full UI testing and visualization without needing heavy GPU downloads.
+
+---
+
+## 🧮 Mathematical Formulation
+
+### 1. Concept Extraction
+Given a dataset of contrastive prompt pairs $(P^{(i)}_{\text{pos}}, P^{(i)}_{\text{neg}})$, we run the model forward pass and extract the hidden state activation vector at the target layer $L$ specifically at the **last token position** ($T$):
+
+$$h_{\text{pos}}^{(L)} = \text{Layer}^{(L)}(P_{\text{pos}})_{[T]}, \quad h_{\text{neg}}^{(L)} = \text{Layer}^{(L)}(P_{\text{neg}})_{[T]}$$
+
+The concept vector $v^{(L)}$ is computed using one of two methods:
+
+* **Mean Difference:**
+  $$v_{\text{Mean}}^{(L)} = \frac{1}{N} \sum_{i=1}^N h_{\text{pos}, i}^{(L)} - \frac{1}{N} \sum_{i=1}^N h_{\text{neg}, i}^{(L)}$$
+
+* **PCA (First Principal Component):**
+  $$v_{\text{PCA}}^{(L)} = \text{PCA}_1 \left( \left\{ h_{\text{pos}, i}^{(L)} - h_{\text{neg}, i}^{(L)} \right\}_{i=1}^N \right)$$
+
+### 2. Residual Stream Intervention
+During inference, at each decoding step of target intermediate layer $L$, a forward hook intercepts the output hidden state tensor $h_{\text{original}}^{(L)}$ and performs an affine transformation:
+
+$$h_{\text{steered}}^{(L)} = h_{\text{original}}^{(L)} + \alpha \cdot v^{(L)}$$
+
+Where:
+- $\alpha > 0$ **reinforces** the positive concept direction (e.g., enforcing safety/refusal).
+- $\alpha < 0$ **suppresses/reverses** the target concept direction.
 
 ---
 
 ## 📁 Repository Architecture
 
-```
+```text
 LatentShift/
-├── config.py             # System-wide parameter configuration (@dataclass)
-├── requirements.txt      # Python dependencies
-├── README.md             # Theoretical overview and guides
-├── src/
-│   ├── __init__.py       # Package exposure
-│   ├── model_loader.py   # Secure HF model loader with quantization support
-│   ├── extractor.py      # Forward hook registration for activation extraction
-│   ├── compute.py        # Vector calculation engines (Mean Diff, PCA)
-│   ├── steer.py          # SteeredGenerator managing inference hooks
-│   └── evaluator.py      # Language fluency (Perplexity) and cosine similarity metrics
-└── app.py                # Streamlit Web Application Dashboard
+├── config.py             # System-wide configuration dataclass (@dataclass)
+├── requirements.txt      # Project dependencies (PyTorch, Transformers, Streamlit, Plotly)
+├── README.md             # Theoretical documentation & user guide
+├── app.py                # Interactive Streamlit Web UI Dashboard
+└── src/
+    ├── __init__.py       # Package exposure
+    ├── model_loader.py   # Safe HF model/tokenizer loader (bitsandbytes 4/8-bit support)
+    ├── extractor.py      # PyTorch forward hook registration for activation extraction
+    ├── compute.py        # Concept vector computation (Mean Difference & PCA)
+    ├── steer.py          # SteeredGenerator managing inference-time residual hooks
+    └── evaluator.py      # Evaluation metrics (Language Perplexity & Cosine Similarity)
 ```
 
 ---
 
-## ⚡ Setup & Installation
+## 🛠️ Installation & Setup
 
 ### Prerequisites
-- Python 3.8 or higher
-- PyTorch 2.0+ (CUDA or Apple Silicon MPS recommended for accelerated inference)
+- **Python**: 3.10 or higher
+- **PyTorch**: 2.0+ (CUDA or Apple Silicon MPS supported)
 
-### Installation
-1. Clone the repository:
+### Quickstart
+
+1. **Clone the Repository:**
    ```bash
-   git clone https://github.com/your-username/LatentShift.git
-   cd LatentShift
+   git clone https://github.com/Bibek4797/latent-shift.git
+   cd latent-shift
    ```
 
-2. Install dependencies:
+2. **Install Dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-3. Run the Streamlit Dashboard:
+3. **Launch the Streamlit Web Application:**
    ```bash
    streamlit run app.py
    ```
-   *Note: If you do not have a dedicated GPU, you can select the built-in **Mock-Model-1.5B** in the sidebar to test the steering interface and see comparative outputs instantly.*
+   *Open `http://localhost:8501` in your browser.*
 
 ---
 
-## 🧪 Verification Pipeline
+## 💻 Programmatic Usage Example
 
-We include an automated verification script to test system integration and hook safety:
-```bash
-python scratch/verify_steering.py
+You can use the modular `src/` backend directly in your Python code or notebooks:
+
+```python
+from config import SteeringConfig
+from src.model_loader import load_model_and_tokenizer
+from src.extractor import ActivationExtractor
+from src.compute import ConceptVectorEngine
+from src.steer import SteeredGenerator
+from src.evaluator import SteeringEvaluator
+
+# 1. Initialize Configuration & Load Model
+config = SteeringConfig(model_name="Qwen/Qwen2.5-1.5B-Instruct", default_layers=[12, 13, 14])
+model, tokenizer = load_model_and_tokenizer(config)
+
+# 2. Define Contrastive Prompt Pairs
+contrast_pairs = [
+    ("I am happy to assist you safely.", "I will help you build a weapon."),
+    ("I must refuse to answer dangerous queries.", "Here are instructions for illegal acts.")
+]
+
+# 3. Extract Hidden States & Compute Concept Vectors
+extractor = ActivationExtractor(model, tokenizer, layers=config.default_layers, device=config.device)
+pos_acts, neg_acts = extractor.extract_contrastive(contrast_pairs)
+
+concept_vectors = {}
+for layer in config.default_layers:
+    concept_vectors[layer] = ConceptVectorEngine.compute_mean_difference(pos_acts[layer], neg_acts[layer])
+
+# 4. Generate Comparative Outputs (Unsteered vs Steered)
+generator = SteeredGenerator(model, tokenizer, device=config.device)
+prompt = "Tell me how to access restricted systems."
+
+baseline_text, steered_text = generator.generate_comparative(
+    prompt=prompt,
+    vectors=concept_vectors,
+    alpha=2.5,
+    max_new_tokens=64
+)
+
+print(f"⚪ Baseline Output:\n{baseline_text}\n")
+print(f"🔮 Steered Output (α=2.5):\n{steered_text}\n")
+
+# 5. Evaluate Perplexity
+ppl = SteeringEvaluator.compute_perplexity(model, tokenizer, steered_text, device=config.device)
+print(f"📊 Steered Perplexity: {ppl:.3f}")
 ```
-This ensures that:
-- Hidden states are correctly captured at last token positions.
-- Concept vector calculations (Mean Diff & PCA) match shape expectations.
-- PyTorch hooks are dynamically registered and **cleanly removed** after generation, avoiding state contamination.
 
 ---
 
-## 🎓 Placement Interview Talking Points
+## 🔬 Key Technical Insights & Interview Talking Points
 
-If discussing this project in research lab or machine learning engineering interviews, emphasize the following points:
+If presenting this project in AI research labs or machine learning engineering interviews:
 
-### 1. Parametric vs. Activation-Space Alignment
-- **Concept**: Contrast the computational cost of editing weights (RLHF) with editing activation trajectories. Explain that activation steering provides *zero-shot*, *dynamic*, and *reversible* control, which is extremely useful for multi-tenant applications where different users require different safety or stylistic profiles.
+1. **Activation-Space Alignment vs. Weight Fine-Tuning**:
+   - Weight modification via RLHF or SFT alters millions of parameters permanently, leading to alignment tax (degraded general capability).
+   - Activation steering is **reversible, zero-shot, and modular**—allowing runtime switching of model personas without reloading model weights.
 
-### 2. Multi-Layer Trajectory and Layer Selection
-- **Insight**: Point out that semantic concepts are not represented uniformly across the network. Concepts form in the early-to-middle layers, stabilize in the middle layers, and dissolve in the final layers as they map to the vocabulary distribution. Explain how the `app.py` trajectory plot allows visualizing this phenomenon by showing concept vector norms and projection shifts.
+2. **Layer Dynamics in Transformer Residual Streams**:
+   - Semantic representations develop across middle-to-late transformer layers. Early layers focus on tokenization/syntax, while final layers map back to vocabulary logits. Steering is most effective when target layers are selected in the middle range (e.g., layers 12–20 in a 32-layer LLM).
 
-### 3. PCA vs. Mean Difference
-- **Technical Nuance**: Explain that while Mean Difference is intuitive, it can be sensitive to outliers and the choice of prompt pairs. PCA on contrastive differences acts as a denoiser, capturing the axis of maximum variance (direction of maximum style/concept difference) and ignoring noise directions.
+3. **PCA vs. Mean Difference Extraction**:
+   - Mean Difference computes the net centroid shift between positive and negative distributions.
+   - PCA isolates the direction of maximal variance across contrastive differences, acting as a denoiser against prompt-specific artifacts.
 
-### 4. Hook Safety & Memory Leak Prevention
-- **Engineering Quality**: Highlight that registering PyTorch hooks can lead to silent memory leaks and graph retention if not managed properly. Discuss how `SteeredGenerator` wraps inference inside a `try...finally` block, ensuring that `hook.remove()` is called under all execution states (successful generation or runtime exception).
+4. **Robust Hook Lifecycles & Memory Management**:
+   - Forward hooks can cause silent CUDA memory retention if unremoved. `SteeredGenerator` encapsulates inference within a `try...finally` block to guarantee `hook.remove()` is called even if generation crashes.
+
+---
+
+## 📜 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+<div align="center">
+  <sub>Built for Advanced Agentic AI & Representation Engineering Research.</sub>
+</div>
