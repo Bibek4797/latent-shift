@@ -1,25 +1,41 @@
-from typing import Dict, List, Tuple, Optional
+"""
+src/steer.py
+------------
+Runtime activation steering via PyTorch forward hooks.
+
+The ``SteeredGenerator`` class manages the full lifecycle of concept vector
+injection into a causal LLM:
+
+1. Registers output hooks on target residual stream layers.
+2. At each token step, modifies hidden states as:
+   ``h_steered = h_original + alpha * v_concept``
+3. Removes hooks cleanly after generation (via ``try/finally``).
+4. Provides ``generate_comparative`` for side-by-side baseline vs. steered output.
+"""
+
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from src.utils import get_logger, get_transformer_layer, set_seed
+
+logger = get_logger(__name__)
+
+
 class SteeredGenerator:
     """
-    SteeredGenerator for dynamically injecting steering vectors during inference.
-
-    This class manages PyTorch forward hooks to modify the residual stream
-    activations of target layers in a causal language model during token generation.
-    It provides methods to generate unsteered baseline text and steered text
-    side-by-side.
+    Inject concept steering vectors into LLM residual streams during generation.
 
     Parameters
     ----------
     model : AutoModelForCausalLM
-        The causal language model to apply steering to.
+        The causal language model to steer.
     tokenizer : AutoTokenizer
-        The tokenizer corresponding to the model.
+        Corresponding tokenizer.
     device : str, default="cpu"
-        The computing device (e.g., 'cuda', 'mps', 'cpu').
+        Target compute device.
     """
 
     def __init__(
@@ -27,102 +43,77 @@ class SteeredGenerator:
         model: AutoModelForCausalLM,
         tokenizer: AutoTokenizer,
         device: str = "cpu",
-    ):
+    ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.active_hooks: List[torch.utils.hooks.RemovableHandle] = []
+        logger.info("SteeredGenerator initialized | device=%s", device)
 
-    def _get_layer(self, layer_idx: int) -> nn.Module:
-        """
-        Retrieve the transformer layer module by index dynamically.
-
-        Parameters
-        ----------
-        layer_idx : int
-            The index of the target layer.
-
-        Returns
-        -------
-        nn.Module
-            The PyTorch module representing the target layer.
-
-        Raises
-        ------
-        AttributeError
-            If the model architecture does not match known patterns.
-        """
-        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
-            return self.model.model.layers[layer_idx]
-        elif hasattr(self.model, "transformer") and hasattr(
-            self.model.transformer, "h"
-        ):
-            return self.model.transformer.h[layer_idx]
-        elif hasattr(self.model, "gpt_neox") and hasattr(
-            self.model.gpt_neox, "layers"
-        ):
-            return self.model.gpt_neox.layers[layer_idx]
-        else:
-            raise AttributeError(
-                "Unsupported transformer architecture. "
-                "Unable to locate model layers dynamically."
-            )
+    # ------------------------------------------------------------------
+    # Hook management
+    # ------------------------------------------------------------------
 
     def register_steering_hooks(
-        self, vectors: Dict[int, torch.Tensor], alpha: float
+        self,
+        vectors: Dict[int, torch.Tensor],
+        alpha: float,
     ) -> None:
         """
-        Register steering hooks on specified layers.
+        Attach output hooks that additively inject concept vectors.
+
+        The hook applies:  ``h_steered = h_original + alpha * v_concept``
+
+        Existing hooks are removed before new ones are registered to avoid
+        accidental stacking.
 
         Parameters
         ----------
         vectors : Dict[int, torch.Tensor]
-            Dictionary mapping layer indices to concept vectors.
+            ``{layer_idx: concept_vector}`` mapping.
         alpha : float
-            Steering intensity coefficient.
+            Steering coefficient.  ``alpha > 0`` reinforces the positive
+            concept; ``alpha < 0`` suppresses or reverses it.
         """
-        # Ensure any existing hooks are removed first
         self.remove_steering_hooks()
 
-        def get_steering_hook(layer_idx: int, concept_vector: torch.Tensor):
-            def steering_hook(module: nn.Module, input_args: Tuple, output: nn.Module):
-                # Unpack the output tuple if needed
-                if isinstance(output, tuple):
-                    hidden_states = output[0]
-                else:
-                    hidden_states = output
-
-                # Align shape of concept vector for broadcasting
-                # h shape: (batch_size, seq_len, hidden_dim)
-                # concept_vector shape: (hidden_dim,)
-                # Move concept vector to the same device/dtype as hidden_states
+        def _make_hook(concept_vector: torch.Tensor):
+            def _steering_hook(
+                module: nn.Module,
+                input_args: Tuple,
+                output,
+            ):
+                hidden = output[0] if isinstance(output, tuple) else output
                 vec = concept_vector.to(
-                    device=hidden_states.device, dtype=hidden_states.dtype
+                    device=hidden.device, dtype=hidden.dtype
                 )
-
-                # Add the scaled concept vector to the original hidden states
-                steered_hidden_states = hidden_states + alpha * vec
-
+                steered = hidden + alpha * vec
                 if isinstance(output, tuple):
-                    return (steered_hidden_states,) + output[1:]
-                return steered_hidden_states
+                    return (steered,) + output[1:]
+                return steered
 
-            return steering_hook
+            return _steering_hook
 
-        for layer, vec in vectors.items():
-            layer_module = self._get_layer(layer)
-            hook = layer_module.register_forward_hook(
-                get_steering_hook(layer, vec)
-            )
+        for layer_idx, vec in vectors.items():
+            module = get_transformer_layer(self.model, layer_idx)
+            hook = module.register_forward_hook(_make_hook(vec))
             self.active_hooks.append(hook)
 
+        logger.debug(
+            "Registered %d steering hooks | alpha=%.3f", len(self.active_hooks), alpha
+        )
+
     def remove_steering_hooks(self) -> None:
-        """
-        Remove all active steering hooks from the model.
-        """
+        """Remove all currently registered steering hooks."""
         for hook in self.active_hooks:
             hook.remove()
+        if self.active_hooks:
+            logger.debug("Removed %d steering hooks.", len(self.active_hooks))
         self.active_hooks.clear()
+
+    # ------------------------------------------------------------------
+    # Generation
+    # ------------------------------------------------------------------
 
     def generate(
         self,
@@ -130,50 +121,77 @@ class SteeredGenerator:
         max_new_tokens: int = 128,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: int = 50,
         do_sample: bool = True,
+        seed: Optional[int] = None,
     ) -> str:
         """
-        Generate text under the current state of the model.
+        Generate text under the model's current hook state.
 
         Parameters
         ----------
         prompt : str
-            The input prompt string (can include chat templates).
+            Input text (may include a chat template prefix).
         max_new_tokens : int, default=128
-            Maximum number of new tokens to generate.
+            Maximum tokens to generate.
         temperature : float, default=0.7
-            Sampling temperature.
+            Sampling temperature. Ignored when ``do_sample=False``.
         top_p : float, default=0.9
-            Nucleus sampling probability.
+            Nucleus sampling probability. Ignored when ``do_sample=False``.
+        top_k : int, default=50
+            Top-k sampling cutoff. Ignored when ``do_sample=False``.
         do_sample : bool, default=True
-            Whether to use sampling or greedy decoding.
+            Use sampling; set ``False`` for greedy / deterministic decoding.
+        seed : int, optional
+            If provided, calls ``set_seed(seed)`` before generation for
+            reproducibility.
 
         Returns
         -------
         str
-            The generated output text (excluding the input prompt).
+            Generated text with the prompt tokens stripped.
+
+        Raises
+        ------
+        ValueError
+            If ``prompt`` is empty.
         """
+        if not prompt.strip():
+            raise ValueError("prompt must not be empty.")
+
+        if seed is not None:
+            set_seed(seed)
+
         inputs = self.tokenizer(prompt, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        # Build token generation kwargs
-        gen_kwargs = {
+        gen_kwargs: Dict = {
             "max_new_tokens": max_new_tokens,
-            "temperature": temperature if do_sample else None,
-            "top_p": top_p if do_sample else None,
             "do_sample": do_sample,
             "pad_token_id": self.tokenizer.pad_token_id,
         }
-        # Filter out None values
-        gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+        if do_sample:
+            gen_kwargs.update(
+                {
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                }
+            )
 
         with torch.no_grad():
             output_ids = self.model.generate(**inputs, **gen_kwargs)
 
-        # Slice to exclude input tokens
         input_len = inputs["input_ids"].shape[1]
         generated_ids = output_ids[0, input_len:]
-        return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        logger.debug(
+            "Generated %d tokens | do_sample=%s | seed=%s",
+            len(generated_ids),
+            do_sample,
+            seed,
+        )
+        return text
 
     def generate_comparative(
         self,
@@ -183,60 +201,63 @@ class SteeredGenerator:
         max_new_tokens: int = 128,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: int = 50,
         do_sample: bool = True,
+        seed: Optional[int] = None,
     ) -> Tuple[str, str]:
         """
-        Generate both unsteered baseline text and steered text side-by-side.
+        Generate both an unsteered baseline and a steered output.
 
-        Ensures that hooks are cleanly registered, used for generation,
-        and removed, even in the event of an error.
+        Hooks are guaranteed to be removed after both generations regardless
+        of exceptions, preventing hook leakage.
 
         Parameters
         ----------
         prompt : str
-            The input prompt string.
+            Input text.
         vectors : Dict[int, torch.Tensor]
-            Dictionary mapping layer indices to concept vectors.
+            Concept vectors keyed by layer index.
         alpha : float
             Steering intensity coefficient.
         max_new_tokens : int, default=128
-            Maximum number of new tokens to generate.
         temperature : float, default=0.7
-            Sampling temperature.
         top_p : float, default=0.9
-            Nucleus sampling probability.
+        top_k : int, default=50
         do_sample : bool, default=True
-            Whether to use sampling or greedy decoding.
+        seed : int, optional
+            Fixed seed for identical sampling conditions in both runs.
 
         Returns
         -------
         baseline_text : str
-            The generated text without steering hooks.
+            Output without steering.
         steered_text : str
-            The generated text with steering hooks active.
+            Output with concept vector injected.
         """
-        # Ensure model has no hooks during baseline generation
-        self.remove_steering_hooks()
-        baseline_text = self.generate(
-            prompt,
+        gen_kwargs = dict(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
+            top_k=top_k,
             do_sample=do_sample,
+            seed=seed,
         )
 
+        # Baseline (no hooks)
+        self.remove_steering_hooks()
+        logger.info("Generating baseline response...")
+        baseline_text = self.generate(prompt, **gen_kwargs)
+
+        # Steered
         try:
-            # Register steering hooks and generate
             self.register_steering_hooks(vectors, alpha)
-            steered_text = self.generate(
-                prompt,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
+            logger.info(
+                "Generating steered response | alpha=%.3f | layers=%s",
+                alpha,
+                list(vectors.keys()),
             )
+            steered_text = self.generate(prompt, **gen_kwargs)
         finally:
-            # Clean up hooks under all circumstances
             self.remove_steering_hooks()
 
         return baseline_text, steered_text

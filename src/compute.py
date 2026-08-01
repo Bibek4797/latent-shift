@@ -1,148 +1,241 @@
+"""
+src/compute.py
+--------------
+Concept vector computation, persistence, and loading.
+
+Implements two extraction strategies:
+
+1. **Mean Difference**: The centroid of positive activations minus the centroid
+   of negative activations.  Simple, interpretable, effective.
+
+2. **PCA (First Principal Component)**: Fits PCA on the element-wise differences
+   and extracts the direction of maximal variance.  Acts as a denoiser when
+   contrastive prompts introduce spurious variability.
+
+Each saved file is a torch checkpoint containing both the vectors *and* metadata
+(model name, method, target layers, timestamp) for full reproducibility.
+"""
+
 import os
-from typing import Dict
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+
 import numpy as np
-from sklearn.decomposition import PCA
 import torch
+from sklearn.decomposition import PCA
+
+from src.utils import get_logger, normalize_vector
+
+logger = get_logger(__name__)
+
 
 class ConceptVectorEngine:
     """
-    ConceptVectorEngine for computing, saving, and loading steering vectors.
+    Compute, persist, and load steering concept vectors.
 
-    This engine supports calculating concept vectors via:
-    1. Mean Difference: Calculates the mean difference between positive and negative
-       hidden states.
-    2. Principal Component Analysis (PCA): Calculates the first principal component
-       of the difference of positive and negative hidden states.
-
-    It also ensures the sign of the PCA-extracted vector matches the positive concept direction.
+    All methods are static so the class acts as a stateless namespace.
     """
+
+    # ------------------------------------------------------------------
+    # Computation
+    # ------------------------------------------------------------------
 
     @staticmethod
     def compute_mean_difference(
-        pos_activations: torch.Tensor, neg_activations: torch.Tensor
+        pos_activations: torch.Tensor,
+        neg_activations: torch.Tensor,
+        normalize: bool = False,
     ) -> torch.Tensor:
         """
-        Calculate the mean difference vector: v = mean(h_pos) - mean(h_neg).
+        Compute ``v = mean(h_pos) - mean(h_neg)``.
 
         Parameters
         ----------
         pos_activations : torch.Tensor
-            Hidden state activations for positive prompts. Shape: `(num_samples, hidden_dim)`.
+            Shape ``(num_samples, hidden_dim)``.
         neg_activations : torch.Tensor
-            Hidden state activations for negative prompts. Shape: `(num_samples, hidden_dim)`.
+            Shape ``(num_samples, hidden_dim)``.
+        normalize : bool, default=False
+            If True, L2-normalize the result to unit length before returning.
 
         Returns
         -------
         torch.Tensor
-            The calculated mean difference concept vector. Shape: `(hidden_dim,)`.
+            Concept vector of shape ``(hidden_dim,)``.
         """
-        # Ensure activations are float32 for stable mean computation, then cast back
         orig_dtype = pos_activations.dtype
-        mean_pos = torch.mean(pos_activations.to(torch.float32), dim=0)
-        mean_neg = torch.mean(neg_activations.to(torch.float32), dim=0)
-
-        diff = mean_pos - mean_neg
-        return diff.to(orig_dtype)
+        mean_pos = pos_activations.to(torch.float32).mean(dim=0)
+        mean_neg = neg_activations.to(torch.float32).mean(dim=0)
+        vec = mean_pos - mean_neg
+        if normalize:
+            vec = normalize_vector(vec)
+        logger.debug(
+            "Mean difference vector computed | norm=%.4f | normalize=%s",
+            torch.norm(vec).item(),
+            normalize,
+        )
+        return vec.to(orig_dtype)
 
     @staticmethod
     def compute_pca_vector(
-        pos_activations: torch.Tensor, neg_activations: torch.Tensor
+        pos_activations: torch.Tensor,
+        neg_activations: torch.Tensor,
+        normalize: bool = False,
     ) -> torch.Tensor:
         """
-        Calculate the concept vector using PCA on the differences (h_pos - h_neg).
+        Compute the first principal component of ``(h_pos - h_neg)``.
 
-        Extracts the first principal component. Ensures sign alignment with the positive
-        mean difference direction.
+        The sign of the component is aligned to the mean-difference direction
+        so that positive alpha always steers toward the positive concept.
 
         Parameters
         ----------
         pos_activations : torch.Tensor
-            Hidden state activations for positive prompts. Shape: `(num_samples, hidden_dim)`.
+            Shape ``(num_samples, hidden_dim)``.
         neg_activations : torch.Tensor
-            Hidden state activations for negative prompts. Shape: `(num_samples, hidden_dim)`.
+            Shape ``(num_samples, hidden_dim)``.
+        normalize : bool, default=False
+            If True, L2-normalize the result to unit length before returning.
 
         Returns
         -------
         torch.Tensor
-            The calculated PCA concept vector. Shape: `(hidden_dim,)`.
+            PCA-derived concept vector of shape ``(hidden_dim,)``.
         """
         orig_dtype = pos_activations.dtype
-        diffs = (pos_activations - neg_activations).to(torch.float32).numpy()
+        diffs_np = (
+            (pos_activations - neg_activations).to(torch.float32).numpy()
+        )
 
-        # Fit PCA to extract the first principal component
         pca = PCA(n_components=1)
-        pca.fit(diffs)
+        pca.fit(diffs_np)
 
-        # Get the first principal component
-        pca_vector_np = pca.components_[0]
-        pca_vector = torch.tensor(pca_vector_np, dtype=torch.float32)
+        pca_vec = torch.tensor(pca.components_[0], dtype=torch.float32)
+        explained = float(pca.explained_variance_ratio_[0])
 
-        # Align the sign of the PCA component with the mean difference direction
-        mean_diff = torch.mean(
-            (pos_activations - neg_activations).to(torch.float32), dim=0
+        # ---- Sign alignment ------------------------------------------------
+        mean_diff = (pos_activations - neg_activations).to(torch.float32).mean(dim=0)
+        cos_sim = torch.dot(pca_vec, mean_diff) / (
+            torch.norm(pca_vec) * torch.norm(mean_diff) + 1e-9
         )
-        cos_sim = torch.dot(pca_vector, mean_diff) / (
-            torch.norm(pca_vector) * torch.norm(mean_diff) + 1e-9
-        )
-
         if cos_sim < 0:
-            pca_vector = -pca_vector
+            pca_vec = -pca_vec
 
-        return pca_vector.to(orig_dtype)
+        if normalize:
+            pca_vec = normalize_vector(pca_vec)
+
+        logger.debug(
+            "PCA vector computed | explained_variance=%.4f | cos_sim=%.4f | normalize=%s",
+            explained,
+            cos_sim.item(),
+            normalize,
+        )
+        return pca_vec.to(orig_dtype)
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
 
     @staticmethod
     def save_vectors(
-        vectors: Dict[int, torch.Tensor], data_dir: str, filename: str
+        vectors: Dict[int, torch.Tensor],
+        data_dir: str,
+        filename: str,
+        metadata: Optional[Dict] = None,
     ) -> str:
         """
-        Save computed concept vectors to disk.
+        Save concept vectors and optional metadata to a ``.pt`` checkpoint.
+
+        The checkpoint structure is::
+
+            {
+                "vectors": {layer_idx: tensor, ...},
+                "metadata": {
+                    "model_name": ...,
+                    "method": ...,
+                    "layers": [...],
+                    "timestamp": "YYYY-MM-DD HH:MM:SS",
+                    ...   # any extra keys from the caller
+                }
+            }
 
         Parameters
         ----------
         vectors : Dict[int, torch.Tensor]
-            Dictionary mapping layer indices to their computed concept vectors.
+            Mapping of layer index → concept vector.
         data_dir : str
-            Directory path to save the concept vector file.
+            Directory path for saving.  Created if absent.
         filename : str
-            The output filename (e.g. 'safety_vector.pt').
+            Output filename (e.g. ``"safety_mean_diff.pt"``).
+        metadata : dict, optional
+            Extra key-value pairs to store alongside the vectors.
 
         Returns
         -------
         str
-            The absolute path of the saved file.
+            Absolute path of the saved file.
         """
         os.makedirs(data_dir, exist_ok=True)
         file_path = os.path.join(data_dir, filename)
 
-        # Move vectors to CPU before saving to make it device-independent
-        cpu_vectors = {layer: vec.cpu().detach() for layer, vec in vectors.items()}
-        torch.save(cpu_vectors, file_path)
+        cpu_vectors = {
+            layer: vec.cpu().detach().float()
+            for layer, vec in vectors.items()
+        }
+
+        meta = metadata or {}
+        meta.setdefault("timestamp", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+        meta.setdefault("layers", sorted(cpu_vectors.keys()))
+
+        checkpoint = {"vectors": cpu_vectors, "metadata": meta}
+        torch.save(checkpoint, file_path)
+
+        logger.info("Vectors saved | path=%s | layers=%s", file_path, list(cpu_vectors.keys()))
         return file_path
 
     @staticmethod
     def load_vectors(file_path: str) -> Dict[int, torch.Tensor]:
         """
-        Load concept vectors from disk.
+        Load concept vectors from a saved checkpoint.
+
+        Handles both the new checkpoint format (dict with ``"vectors"`` key)
+        and the legacy format (raw ``{layer: tensor}`` dict) for backwards
+        compatibility.
 
         Parameters
         ----------
         file_path : str
-            The path to the saved concept vector file.
+            Path to the ``.pt`` file.
 
         Returns
         -------
         Dict[int, torch.Tensor]
-            Dictionary mapping layer indices to their loaded concept vectors.
+            Mapping of layer index → concept vector.
 
         Raises
         ------
         FileNotFoundError
-            If the file does not exist at the specified path.
+            If ``file_path`` does not exist.
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(
-                f"No concept vector file found at: {file_path}"
+                f"Concept vector file not found: {file_path}"
             )
 
-        vectors = torch.load(file_path, map_location="cpu")
-        return vectors
+        # weights_only=False required because we store a mixed dict with tensors + metadata
+        checkpoint = torch.load(file_path, map_location="cpu", weights_only=False)
+
+        # New format
+        if isinstance(checkpoint, dict) and "vectors" in checkpoint:
+            meta = checkpoint.get("metadata", {})
+            logger.info(
+                "Vectors loaded | path=%s | metadata=%s", file_path, meta
+            )
+            return checkpoint["vectors"]
+
+        # Legacy format — plain {layer: tensor} dict
+        logger.warning(
+            "Legacy vector format detected in %s. Consider re-extracting.",
+            file_path,
+        )
+        return checkpoint

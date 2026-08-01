@@ -1,9 +1,13 @@
+"""LatentShift — src package."""
+
+from src.compute import ConceptVectorEngine
+from src.evaluator import SteeringEvaluator
+from src.extractor import ActivationExtractor
+from src.model_loader import load_model_and_tokenizer
+from src.steer import SteeredGenerator
+from src.utils import get_logger, normalize_vector, set_seed
+
 from config import SteeringConfig
-from .model_loader import load_model_and_tokenizer
-from .extractor import ActivationExtractor
-from .compute import ConceptVectorEngine
-from .steer import SteeredGenerator
-from .evaluator import SteeringEvaluator
 
 __all__ = [
     "SteeringConfig",
@@ -12,4 +16,7 @@ __all__ = [
     "ConceptVectorEngine",
     "SteeredGenerator",
     "SteeringEvaluator",
+    "get_logger",
+    "set_seed",
+    "normalize_vector",
 ]

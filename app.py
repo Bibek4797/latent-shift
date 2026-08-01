@@ -16,6 +16,9 @@ from src.extractor import ActivationExtractor
 from src.compute import ConceptVectorEngine
 from src.steer import SteeredGenerator
 from src.evaluator import SteeringEvaluator
+from src.utils import get_logger
+
+logger = get_logger("app")
 
 # ==========================================
 # MOCK LLM IMPLEMENTATION FOR EASY LOCAL DEMO
@@ -53,6 +56,11 @@ class MockCausalLM(nn.Module):
     def generate(self, input_ids: torch.Tensor, **kwargs) -> torch.Tensor:
         dummy_tokens = torch.randint(100, 1000, (1, 20), device=input_ids.device)
         return torch.cat([input_ids, dummy_tokens], dim=1)
+
+    def get_input_embeddings(self) -> nn.Module:
+        """Return a stub embedding layer so SteeringEvaluator can compute text embeddings."""
+        return nn.Embedding(32000, 4096)
+
 
 class MockTokenizer:
     """
@@ -355,7 +363,12 @@ if compute_needed and len(target_layers) > 0:
                 for layer in target_layers:
                     # Synthetic concept vector
                     sim_vectors[layer] = torch.randn(4096)
-                ConceptVectorEngine.save_vectors(sim_vectors, config.data_dir, vector_filename)
+                ConceptVectorEngine.save_vectors(
+                    sim_vectors, 
+                    config.data_dir, 
+                    vector_filename,
+                    metadata={"model_name": model_name, "concept": selected_concept, "method": comp_method, "mock": True},
+                )
             else:
                 # Real Extraction
                 extractor = ActivationExtractor(model, tokenizer, target_layers, config.device)
@@ -371,7 +384,17 @@ if compute_needed and len(target_layers) > 0:
                         computed_vectors[layer] = ConceptVectorEngine.compute_pca_vector(
                             pos_acts[layer], neg_acts[layer]
                         )
-                ConceptVectorEngine.save_vectors(computed_vectors, config.data_dir, vector_filename)
+                ConceptVectorEngine.save_vectors(
+                        computed_vectors,
+                        config.data_dir,
+                        vector_filename,
+                        metadata={
+                            "model_name": model_name,
+                            "concept": selected_concept,
+                            "method": comp_method,
+                            "layers": target_layers,
+                        },
+                    )
                 
             st.session_state.concept_vectors = ConceptVectorEngine.load_vectors(vector_path)
             st.session_state.vector_concept_name = selected_concept
@@ -405,11 +428,13 @@ prompt_input = st.text_area(
     height=100
 )
 
-col_gen1, col_gen2 = st.columns([1, 4])
+col_gen1, col_gen2, col_gen3 = st.columns([1, 1, 4])
 with col_gen1:
     max_tokens = st.number_input("Max New Tokens", min_value=10, max_value=512, value=80, step=10)
 with col_gen2:
     do_sample = st.checkbox("Enable Sampling", value=False)
+with col_gen3:
+    seed_val = st.number_input("Seed (for reproducibility)", min_value=0, max_value=99999, value=42, step=1)
 
 generate_clicked = st.button("🚀 Run Latent Steering Inference", type="primary")
 
@@ -452,12 +477,22 @@ if generate_clicked and len(target_layers) > 0:
                     vectors=current_vectors,
                     alpha=alpha,
                     max_new_tokens=max_tokens,
-                    do_sample=do_sample
+                    do_sample=do_sample,
+                    seed=int(seed_val),
                 )
 
-                # Compute Perplexities
-                ppl_baseline = SteeringEvaluator.compute_perplexity(model, tokenizer, baseline_text, config.device)
-                ppl_steered = SteeringEvaluator.compute_perplexity(model, tokenizer, steered_text, config.device)
+                # Compute full evaluation report
+                mid_layer = target_layers[len(target_layers) // 2]
+                eval_report = SteeringEvaluator.compute_steering_report(
+                    model=model,
+                    tokenizer=tokenizer,
+                    baseline_text=baseline_text,
+                    steered_text=steered_text,
+                    concept_vector=current_vectors[mid_layer],
+                    device=config.device,
+                )
+                ppl_baseline = eval_report["ppl_baseline"]
+                ppl_steered = eval_report["ppl_steered"]
                 
                 # Render results in side-by-side columns
                 col_left, col_right = st.columns(2)

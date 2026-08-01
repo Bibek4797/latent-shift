@@ -1,8 +1,27 @@
+"""
+src/model_loader.py
+-------------------
+Hugging Face model loading with quantization and memory management.
+
+Handles:
+- Full-precision and quantized (4-bit / 8-bit via bitsandbytes) loading.
+- Multi-GPU placement via ``device_map="auto"``.
+- Tokenizer padding configuration (required for stable generation).
+- Pre- and post-load memory cleanup (CUDA cache + GC).
+"""
+
 import gc
+import logging
 from typing import Tuple
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from config import SteeringConfig
+from src.utils import get_logger
+
+logger = get_logger(__name__)
+
 
 def load_model_and_tokenizer(
     config: SteeringConfig,
@@ -10,43 +29,57 @@ def load_model_and_tokenizer(
     load_in_8bit: bool = False,
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     """
-    Safely load a Hugging Face Causal LLM and its associated tokenizer.
+    Load a Hugging Face Causal LLM and its tokenizer.
 
-    Performs pre-load and post-load memory cleanup (garbage collection and
-    CUDA cache clearing). Configures tokenizer padding properties for batch
-    inference and enables quantization (4-bit/8-bit) if CUDA is available.
+    Pre- and post-load garbage collection and CUDA cache clearing prevent
+    memory fragmentation when multiple models are loaded in a session.
 
     Parameters
     ----------
     config : SteeringConfig
-        System-wide configuration dataclass containing model name, device, and dtype.
+        System-wide configuration with model name, device, and dtype.
     load_in_4bit : bool, default=False
-        If True, loads the model in 4-bit quantization using bitsandbytes (requires CUDA).
+        Enable 4-bit NF4 quantization via bitsandbytes (requires CUDA).
     load_in_8bit : bool, default=False
-        If True, loads the model in 8-bit quantization using bitsandbytes (requires CUDA).
+        Enable 8-bit LLM.int8 quantization via bitsandbytes (requires CUDA).
 
     Returns
     -------
     model : AutoModelForCausalLM
-        The instantiated PyTorch model ready for inference or extraction.
+        Loaded model in eval mode.
     tokenizer : AutoTokenizer
-        The corresponding tokenizer with padding token configured.
+        Corresponding tokenizer with pad token set.
 
     Raises
     ------
     ValueError
-        If invalid model name is provided or device mapping fails.
+        If the model name is unresolvable by Hugging Face Hub.
+    RuntimeError
+        If 4-bit / 8-bit quantization is requested without a CUDA device.
     """
-    # Trigger garbage collection and empty CUDA cache
+    # ---- Pre-load cleanup --------------------------------------------------
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # Configure quantization or device placement options
-    model_kwargs = {
-        "trust_remote_code": True,
-    }
+    logger.info(
+        "Loading model '%s' | device=%s | dtype=%s | 4bit=%s | 8bit=%s",
+        config.model_name,
+        config.device,
+        config.dtype_str,
+        load_in_4bit,
+        load_in_8bit,
+    )
 
+    # ---- Guard: quantization requires CUDA ---------------------------------
+    if (load_in_4bit or load_in_8bit) and not torch.cuda.is_available():
+        raise RuntimeError(
+            "4-bit and 8-bit quantization require a CUDA GPU. "
+            "Remove the quantization flag or run on a CUDA device."
+        )
+
+    # ---- Build model kwargs ------------------------------------------------
+    model_kwargs: dict = {"trust_remote_code": True}
     is_cuda = torch.cuda.is_available() or config.device == "cuda"
 
     if is_cuda:
@@ -58,31 +91,35 @@ def load_model_and_tokenizer(
         else:
             model_kwargs["torch_dtype"] = config.dtype
     else:
-        # Non-CUDA path (CPU or MPS)
+        # CPU / MPS path
         model_kwargs["torch_dtype"] = config.dtype
         if config.device == "mps":
             model_kwargs["device_map"] = "auto"
 
-    # Load Tokenizer
+    # ---- Tokenizer ---------------------------------------------------------
     tokenizer = AutoTokenizer.from_pretrained(
         config.model_name, trust_remote_code=True
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # Left padding is required for batched autoregressive generation
+    # Left-padding is required for stable autoregressive batch generation
     tokenizer.padding_side = "left"
+    logger.info("Tokenizer loaded | vocab_size=%d", tokenizer.vocab_size)
 
-    # Load Model
+    # ---- Model -------------------------------------------------------------
     model = AutoModelForCausalLM.from_pretrained(config.model_name, **model_kwargs)
 
-    # Manual placement if device_map did not map it
+    # Manual device placement when device_map was not set
     if "device_map" not in model_kwargs:
         model = model.to(config.device)
 
-    # Set model to evaluation mode
     model.eval()
+    num_params = sum(p.numel() for p in model.parameters()) / 1e9
+    logger.info(
+        "Model loaded | params=%.2fB | eval_mode=True", num_params
+    )
 
-    # Final cleanup
+    # ---- Post-load cleanup -------------------------------------------------
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

@@ -1,27 +1,43 @@
+"""
+src/extractor.py
+----------------
+Activation extraction via PyTorch forward hooks.
+
+The ``ActivationExtractor`` class registers hooks on target transformer layers,
+runs a forward pass for each prompt, and captures the hidden-state tensor at
+the final token position — the standard approach in Representation Engineering.
+"""
+
 from typing import Dict, List, Tuple
+
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from src.utils import get_logger, get_transformer_layer
+
+logger = get_logger(__name__)
+
+
 class ActivationExtractor:
     """
-    ActivationExtractor for capturing internal representations of Causal LLMs.
+    Capture internal hidden-state activations from a Causal LLM via forward hooks.
 
-    This class registers PyTorch forward hooks on intermediate residual streams
-    to capture the hidden states at the last token position for a set of prompts.
-    It supports contrastive pairs (e.g., Positive vs. Negative) and handles
-    diverse model architectures.
+    Registers ``register_forward_hook`` on each requested transformer layer,
+    runs a single forward pass per prompt under ``torch.no_grad()``, records
+    the activation at the **last token position** (the prediction point), then
+    cleans up all hooks — even if an exception is raised.
 
     Parameters
     ----------
     model : AutoModelForCausalLM
-        The causal language model to extract activations from.
+        The causal language model to probe.
     tokenizer : AutoTokenizer
         The tokenizer corresponding to the model.
     layers : List[int]
-        The list of layer indices to hook and extract activations from.
+        Zero-based layer indices to hook into.
     device : str, default="cpu"
-        The device where the model resides.
+        Device string matching the model's current placement.
     """
 
     def __init__(
@@ -30,135 +46,126 @@ class ActivationExtractor:
         tokenizer: AutoTokenizer,
         layers: List[int],
         device: str = "cpu",
-    ):
+    ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.layers = layers
         self.device = device
+        logger.info(
+            "ActivationExtractor initialized | layers=%s | device=%s",
+            layers,
+            device,
+        )
 
-    def _get_layer(self, layer_idx: int) -> nn.Module:
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def extract_activations(
+        self, prompts: List[str]
+    ) -> Dict[int, torch.Tensor]:
         """
-        Retrieve the transformer layer module by index dynamically.
-
-        Parameters
-        ----------
-        layer_idx : int
-            The index of the target layer.
-
-        Returns
-        -------
-        nn.Module
-            The PyTorch module representing the target layer.
-
-        Raises
-        ------
-        AttributeError
-            If the model architecture does not match known patterns.
-        """
-        # Check standard architectures (Llama, Qwen, Mistral)
-        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
-            return self.model.model.layers[layer_idx]
-        # Check GPT-2 style architectures
-        elif hasattr(self.model, "transformer") and hasattr(
-            self.model.transformer, "h"
-        ):
-            return self.model.transformer.h[layer_idx]
-        # Check GPT-NeoX architectures
-        elif hasattr(self.model, "gpt_neox") and hasattr(
-            self.model.gpt_neox, "layers"
-        ):
-            return self.model.gpt_neox.layers[layer_idx]
-        else:
-            raise AttributeError(
-                "Unsupported transformer architecture. "
-                "Unable to locate model layers dynamically."
-            )
-
-    def extract_activations(self, prompts: List[str]) -> Dict[int, torch.Tensor]:
-        """
-        Extract hidden state activations at the last token for all target layers.
+        Run a forward pass for each prompt and collect last-token activations.
 
         Parameters
         ----------
         prompts : List[str]
-            A list of input text prompts.
+            Input text prompts. Processed one-by-one to avoid padding artefacts.
 
         Returns
         -------
         Dict[int, torch.Tensor]
-            A dictionary mapping layer index to a tensor of shape
-            `(num_prompts, hidden_dim)` containing the last-token activations.
+            Mapping ``{layer_idx: tensor of shape (num_prompts, hidden_dim)}``.
+
+        Raises
+        ------
+        ValueError
+            If ``prompts`` is empty.
         """
-        # Initialize lists to accumulate activations for each layer
+        if not prompts:
+            raise ValueError("prompts list must not be empty.")
+
         accumulated: Dict[int, List[torch.Tensor]] = {
             layer: [] for layer in self.layers
         }
-        hooks = []
+        hooks: List[torch.utils.hooks.RemovableHandle] = []
 
-        # Hook function builder
-        def get_hook(layer_idx: int):
-            def hook_fn(module: nn.Module, input_args: Tuple, output: nn.Module):
-                # Unpack the output tuple if needed
-                if isinstance(output, tuple):
-                    hidden_states = output[0]
-                else:
-                    hidden_states = output
+        def _make_hook(layer_idx: int):
+            def _hook_fn(
+                module: nn.Module,
+                input_args: Tuple,
+                output,
+            ) -> None:
+                hidden = output[0] if isinstance(output, tuple) else output
+                # Shape: (batch=1, seq_len, hidden_dim) → take last token
+                vec = hidden[0, -1, :].clone().detach().cpu()
+                accumulated[layer_idx].append(vec)
 
-                # hidden_states is of shape (batch_size, seq_len, hidden_dim)
-                # We extract the last token position (-1) for the single item in the batch.
-                # Clone and detach to prevent memory leakage or graph retention.
-                last_token_activation = hidden_states[0, -1, :].clone().detach().cpu()
-                accumulated[layer_idx].append(last_token_activation)
+            return _hook_fn
 
-            return hook_fn
+        # ---- Register hooks ------------------------------------------------
+        for layer_idx in self.layers:
+            module = get_transformer_layer(self.model, layer_idx)
+            hooks.append(module.register_forward_hook(_make_hook(layer_idx)))
+        logger.debug("Registered %d forward hooks.", len(hooks))
 
-        # Register forward hooks on target layers
-        for layer in self.layers:
-            layer_module = self._get_layer(layer)
-            hook = layer_module.register_forward_hook(get_hook(layer))
-            hooks.append(hook)
-
+        # ---- Forward passes ------------------------------------------------
         try:
-            # Process prompts one by one to avoid padding mismatch artifacts
-            for prompt in prompts:
+            for i, prompt in enumerate(prompts):
                 inputs = self.tokenizer(prompt, return_tensors="pt")
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
                 with torch.no_grad():
                     self.model(**inputs)
+                logger.debug("Processed prompt %d/%d", i + 1, len(prompts))
         finally:
-            # Ensure hooks are cleanly removed even if an error occurs
             for hook in hooks:
                 hook.remove()
+            logger.debug("All %d hooks removed.", len(hooks))
 
-        # Stack the list of activations into single tensors per layer
-        stacked_activations: Dict[int, torch.Tensor] = {}
-        for layer in self.layers:
-            stacked_activations[layer] = torch.stack(accumulated[layer])
-
-        return stacked_activations
+        # ---- Stack per layer -----------------------------------------------
+        stacked: Dict[int, torch.Tensor] = {
+            layer: torch.stack(accumulated[layer]) for layer in self.layers
+        }
+        logger.info(
+            "Extraction complete | prompts=%d | layers=%s",
+            len(prompts),
+            list(stacked.keys()),
+        )
+        return stacked
 
     def extract_contrastive(
-        self, pairs: List[Tuple[str, str]]
+        self,
+        pairs: List[Tuple[str, str]],
     ) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
         """
-        Extract activations for contrasting prompt pairs.
+        Extract activations for a list of contrastive prompt pairs.
 
         Parameters
         ----------
         pairs : List[Tuple[str, str]]
-            A list of contrastive prompt pairs, e.g., (positive_prompt, negative_prompt).
+            Each element is ``(positive_prompt, negative_prompt)``.
 
         Returns
         -------
         pos_activations : Dict[int, torch.Tensor]
-            Last-token hidden states for positive prompts.
+            Last-token activations for all positive prompts.
         neg_activations : Dict[int, torch.Tensor]
-            Last-token hidden states for negative prompts.
+            Last-token activations for all negative prompts.
+
+        Raises
+        ------
+        ValueError
+            If ``pairs`` is empty.
         """
-        pos_prompts = [pair[0] for pair in pairs]
-        neg_prompts = [pair[1] for pair in pairs]
+        if not pairs:
+            raise ValueError("pairs list must not be empty.")
 
-        pos_activations = self.extract_activations(pos_prompts)
-        neg_activations = self.extract_activations(neg_prompts)
+        pos_prompts = [p[0] for p in pairs]
+        neg_prompts = [p[1] for p in pairs]
 
-        return pos_activations, neg_activations
+        logger.info(
+            "Extracting contrastive activations | num_pairs=%d", len(pairs)
+        )
+        pos_acts = self.extract_activations(pos_prompts)
+        neg_acts = self.extract_activations(neg_prompts)
+        return pos_acts, neg_acts
