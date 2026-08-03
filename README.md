@@ -61,18 +61,59 @@ By capturing concept directions in the model's internal residual stream and dyna
 
 ## 🧮 Mathematical Formulation
 
-### 1. Concept Extraction
-Given a dataset of contrastive prompt pairs $(P^{(i)}_{\text{pos}}, P^{(i)}_{\text{neg}})$, we run the model forward pass and extract the hidden state activation vector at the target layer $L$ specifically at the **last token position** ($T$):
+### 1. Concept Extraction Framework (7 Algorithms)
 
-$$h_{\text{pos}}^{(L)} = \text{Layer}^{(L)}(P_{\text{pos}})_{[T]}, \quad h_{\text{neg}}^{(L)} = \text{Layer}^{(L)}(P_{\text{neg}})_{[T]}$$
+Given a dataset of contrastive prompt pairs $(P^{(i)}_{\text{pos}}, P^{(i)}_{\text{neg}})$, we run the model forward pass and extract target layer hidden representations $\mathbf{X}_{\text{pos}}, \mathbf{X}_{\text{neg}} \in \mathbb{R}^{N \times D}$. LatentShift provides 7 research algorithms:
 
-The concept vector $v^{(L)}$ is computed using one of two methods:
+1. **Mean Difference (`mean_diff`):**
+   $$\boldsymbol{v} = \frac{1}{N_{\text{pos}}} \sum_{i=1}^{N_{\text{pos}}} \mathbf{x}_{\text{pos}, i} - \frac{1}{N_{\text{neg}}} \sum_{j=1}^{N_{\text{neg}}} \mathbf{x}_{\text{neg}, j}$$
+   - **Complexity:** $\mathcal{O}(N \cdot D)$
+   - **Advantage:** Fast, intuitive, zero hyperparameter tuning.
+   - **Disadvantage:** Sensitive to outlier activation magnitudes.
+   - **Reference:** Marks & Tegmark (2023), *The Geometry of Truth*.
 
-* **Mean Difference:**
-  $$v_{\text{Mean}}^{(L)} = \frac{1}{N} \sum_{i=1}^N h_{\text{pos}, i}^{(L)} - \frac{1}{N} \sum_{i=1}^N h_{\text{neg}, i}^{(L)}$$
+2. **Principal Component Analysis (`pca`):**
+   $$\boldsymbol{v} = \arg\max_{\|\boldsymbol{u}\|=1} \boldsymbol{u}^T \left( \mathbf{D}_{\text{diff}}^T \mathbf{D}_{\text{diff}} \right) \boldsymbol{u}, \quad \mathbf{D}_{\text{diff}} = \mathbf{X}_{\text{pos}} - \mathbf{X}_{\text{neg}}$$
+   - **Complexity:** $\mathcal{O}(N \cdot D^2 + D^3)$
+   - **Advantage:** Filters out spurious contrastive noise by extracting maximal variance axis.
+   - **Disadvantage:** Unsupervised variance orientation.
+   - **Reference:** Subramani et al. (2022), *Extracting Latent Steering Vectors via Linear Probing*.
 
-* **PCA (First Principal Component):**
-  $$v_{\text{PCA}}^{(L)} = \text{PCA}_1 \left( \left\{ h_{\text{pos}, i}^{(L)} - h_{\text{neg}, i}^{(L)} \right\}_{i=1}^N \right)$$
+3. **Linear Discriminant Analysis (`lda`):**
+   $$\boldsymbol{v} = \mathbf{\Sigma}_w^{-1} (\boldsymbol{\mu}_{\text{pos}} - \boldsymbol{\mu}_{\text{neg}})$$
+   - **Complexity:** $\mathcal{O}(N \cdot D^2 + D^3)$
+   - **Advantage:** Incorporates feature covariance structure $\mathbf{\Sigma}_w$ for optimal linear separation.
+   - **Disadvantage:** Requires shrinkage / pseudo-inverse regularization in high dimensions ($D > N$).
+   - **Reference:** Fisher (1936); Belrose et al. (2023).
+
+4. **Logistic Regression Direction (`logistic_regression`):**
+   $$\min_{\boldsymbol{w}, b} \frac{1}{2} \|\boldsymbol{w}\|_2^2 + C \sum_{i=1}^N \log\left(1 + \exp(-y_i (\boldsymbol{w}^T \mathbf{x}_i + b))\right)$$
+   - **Complexity:** $\mathcal{O}(k_{\text{iter}} \cdot N \cdot D)$
+   - **Advantage:** Probabilistic hyperplane normal optimized for linear classification boundaries.
+   - **Disadvantage:** Iterative optimization required.
+   - **Reference:** Kim et al. (2018), *Interpretability Beyond Feature Attribution (TCAV)*.
+
+5. **Linear SVM (`linear_svm`):**
+   $$\min_{\boldsymbol{w}, b, \xi} \frac{1}{2} \|\boldsymbol{w}\|_2^2 + C \sum_{i=1}^N \xi_i \quad \text{s.t. } y_i (\boldsymbol{w}^T \mathbf{x}_i + b) \ge 1 - \xi_i$$
+   - **Complexity:** $\mathcal{O}(N^2 \cdot D)$
+   - **Advantage:** Maximizes margin between positive and negative activation clusters.
+   - **Disadvantage:** Computation scales quadratically with dataset size.
+   - **Reference:** Cortes & Vapnik (1995).
+
+6. **Sparse PCA (`sparse_pca`):**
+   $$\min_{\boldsymbol{u}, \boldsymbol{v}} \frac{1}{2} \|\mathbf{X} - \boldsymbol{u}\boldsymbol{v}^T\|_F^2 + \lambda \|\boldsymbol{v}\|_1 \quad \text{s.t. } \|\boldsymbol{u}\|_2 \le 1$$
+   - **Complexity:** $\mathcal{O}(k_{\text{iter}} \cdot N \cdot D)$
+   - **Advantage:** Enforces $L_1$ sparsity for highly interpretable dimension subsets.
+   - **Disadvantage:** Requires tuning sparsity hyperparameter $\lambda$.
+   - **Reference:** Zou et al. (2006).
+
+7. **Truncated SVD (`truncated_svd`):**
+   $$\bar{\mathbf{X}} = \mathbf{U} \mathbf{\Sigma} \mathbf{V}^T, \quad \boldsymbol{v} = \mathbf{V}_{:, 1}$$
+   - **Complexity:** $\mathcal{O}(N \cdot D \cdot k)$
+   - **Advantage:** Extremely fast, memory-efficient singular value decomposition.
+   - **Disadvantage:** Ignores class labels if activations are uncentered.
+   - **Reference:** Golub & Reinsch (1970).
+
 
 ### 2. Adaptive Multi-Layer Residual Stream Intervention
 During inference, at each decoding step of target intermediate layer $l_i$, a forward hook intercepts the output hidden state tensor $h_{\text{original}}^{(l_i)}$ and performs an adaptive affine transformation:

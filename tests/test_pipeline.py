@@ -486,7 +486,61 @@ class TestLayerSelector(unittest.TestCase):
             self.selector.score_layers(pos_dict, neg_dict, method="unknown_metric")
 
 
+class TestConceptExtractors(unittest.TestCase):
+    """Tests for all 7 concept vector extraction algorithms."""
+
+    def setUp(self):
+        self.pos_acts = torch.randn(10, 32) + 2.0
+        self.neg_acts = torch.randn(10, 32) - 2.0
+
+    def test_all_extraction_methods(self):
+        methods = [
+            "mean_diff",
+            "pca",
+            "lda",
+            "logistic_regression",
+            "linear_svm",
+            "sparse_pca",
+            "truncated_svd",
+        ]
+        for m in methods:
+            vec = ConceptVectorEngine.compute_vector(m, self.pos_acts, self.neg_acts, normalize=False)
+            self.assertEqual(vec.shape, (32,))
+            self.assertGreater(torch.norm(vec).item(), 0.0)
+
+    def test_all_extraction_methods_normalized(self):
+        methods = [
+            "mean_diff",
+            "pca",
+            "lda",
+            "logistic_regression",
+            "linear_svm",
+            "sparse_pca",
+            "truncated_svd",
+        ]
+        for m in methods:
+            vec = ConceptVectorEngine.compute_vector(m, self.pos_acts, self.neg_acts, normalize=True)
+            self.assertAlmostEqual(torch.norm(vec).item(), 1.0, places=4)
+
+    def test_invalid_extraction_method_raises(self):
+        with self.assertRaises(ValueError):
+            ConceptVectorEngine.compute_vector("unknown_algo", self.pos_acts, self.neg_acts)
+
+    def test_concept_vector_comparer_benchmark(self):
+        from src.concept_extractors import ConceptVectorComparer
+        res = ConceptVectorComparer.benchmark_all_methods(self.pos_acts, self.neg_acts)
+        self.assertEqual(len(res), 7)
+        self.assertIn("lda", res)
+        self.assertIn("linear_svm", res)
+
+        labels, matrix = ConceptVectorComparer.compute_pairwise_cosine_matrix(res)
+        self.assertEqual(len(labels), 7)
+        self.assertEqual(matrix.shape, (7, 7))
+        self.assertAlmostEqual(matrix[0, 0], 1.0, places=4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
 

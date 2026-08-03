@@ -130,9 +130,10 @@ def parse_args() -> argparse.Namespace:
         "--method",
         type=str,
         default="mean_diff",
-        choices=["mean_diff", "pca"],
-        help="Concept vector computation method.",
+        choices=["mean_diff", "pca", "lda", "logistic_regression", "linear_svm", "sparse_pca", "truncated_svd"],
+        help="Concept vector extraction method.",
     )
+
     parser.add_argument(
         "--alpha",
         type=float,
@@ -283,15 +284,11 @@ def main() -> None:
 
     concept_vectors: dict = {}
     for layer in args.layers:
-        if args.method == "pca":
-            vec = ConceptVectorEngine.compute_pca_vector(
-                pos_acts[layer], neg_acts[layer], normalize=args.normalize
-            )
-        else:
-            vec = ConceptVectorEngine.compute_mean_difference(
-                pos_acts[layer], neg_acts[layer], normalize=args.normalize
-            )
+        vec = ConceptVectorEngine.compute_vector(
+            args.method, pos_acts[layer], neg_acts[layer], normalize=args.normalize
+        )
         concept_vectors[layer] = vec
+
 
     # ---- Save vectors to disk ----------------------------------------------
     safe_concept = args.concept.replace(" ", "_")

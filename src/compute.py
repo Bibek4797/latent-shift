@@ -41,40 +41,50 @@ class ConceptVectorEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def compute_vector(
+        method: str,
+        pos_activations: torch.Tensor,
+        neg_activations: torch.Tensor,
+        normalize: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Compute concept vector using the specified extraction method.
+
+        Parameters
+        ----------
+        method : str
+            Extraction method key ("mean_diff", "pca", "lda", "logistic_regression",
+            "linear_svm", "sparse_pca", "truncated_svd").
+        pos_activations : torch.Tensor
+        neg_activations : torch.Tensor
+        normalize : bool, default=False
+
+        Returns
+        -------
+        torch.Tensor
+            Extracted concept vector of shape (hidden_dim,).
+        """
+        from src.concept_extractors import EXTRACTOR_REGISTRY
+
+        method_clean = method.lower().strip()
+        if method_clean not in EXTRACTOR_REGISTRY:
+            raise ValueError(
+                f"Unknown extraction method '{method}'. "
+                f"Supported methods: {list(EXTRACTOR_REGISTRY.keys())}"
+            )
+
+        extractor = EXTRACTOR_REGISTRY[method_clean]
+        return extractor.extract(pos_activations, neg_activations, normalize=normalize, **kwargs)
+
+    @staticmethod
     def compute_mean_difference(
         pos_activations: torch.Tensor,
         neg_activations: torch.Tensor,
         normalize: bool = False,
     ) -> torch.Tensor:
-        """
-        Compute ``v = mean(h_pos) - mean(h_neg)``.
-
-        Parameters
-        ----------
-        pos_activations : torch.Tensor
-            Shape ``(num_samples, hidden_dim)``.
-        neg_activations : torch.Tensor
-            Shape ``(num_samples, hidden_dim)``.
-        normalize : bool, default=False
-            If True, L2-normalize the result to unit length before returning.
-
-        Returns
-        -------
-        torch.Tensor
-            Concept vector of shape ``(hidden_dim,)``.
-        """
-        orig_dtype = pos_activations.dtype
-        mean_pos = pos_activations.to(torch.float32).mean(dim=0)
-        mean_neg = neg_activations.to(torch.float32).mean(dim=0)
-        vec = mean_pos - mean_neg
-        if normalize:
-            vec = normalize_vector(vec)
-        logger.debug(
-            "Mean difference vector computed | norm=%.4f | normalize=%s",
-            torch.norm(vec).item(),
-            normalize,
-        )
-        return vec.to(orig_dtype)
+        """Compute mean difference vector v = mean(h_pos) - mean(h_neg)."""
+        return ConceptVectorEngine.compute_vector("mean_diff", pos_activations, neg_activations, normalize=normalize)
 
     @staticmethod
     def compute_pca_vector(
@@ -82,55 +92,9 @@ class ConceptVectorEngine:
         neg_activations: torch.Tensor,
         normalize: bool = False,
     ) -> torch.Tensor:
-        """
-        Compute the first principal component of ``(h_pos - h_neg)``.
+        """Compute first principal component concept vector."""
+        return ConceptVectorEngine.compute_vector("pca", pos_activations, neg_activations, normalize=normalize)
 
-        The sign of the component is aligned to the mean-difference direction
-        so that positive alpha always steers toward the positive concept.
-
-        Parameters
-        ----------
-        pos_activations : torch.Tensor
-            Shape ``(num_samples, hidden_dim)``.
-        neg_activations : torch.Tensor
-            Shape ``(num_samples, hidden_dim)``.
-        normalize : bool, default=False
-            If True, L2-normalize the result to unit length before returning.
-
-        Returns
-        -------
-        torch.Tensor
-            PCA-derived concept vector of shape ``(hidden_dim,)``.
-        """
-        orig_dtype = pos_activations.dtype
-        diffs_np = (
-            (pos_activations - neg_activations).to(torch.float32).numpy()
-        )
-
-        pca = PCA(n_components=1)
-        pca.fit(diffs_np)
-
-        pca_vec = torch.tensor(pca.components_[0], dtype=torch.float32)
-        explained = float(pca.explained_variance_ratio_[0])
-
-        # ---- Sign alignment ------------------------------------------------
-        mean_diff = (pos_activations - neg_activations).to(torch.float32).mean(dim=0)
-        cos_sim = torch.dot(pca_vec, mean_diff) / (
-            torch.norm(pca_vec) * torch.norm(mean_diff) + 1e-9
-        )
-        if cos_sim < 0:
-            pca_vec = -pca_vec
-
-        if normalize:
-            pca_vec = normalize_vector(pca_vec)
-
-        logger.debug(
-            "PCA vector computed | explained_variance=%.4f | cos_sim=%.4f | normalize=%s",
-            explained,
-            cos_sim.item(),
-            normalize,
-        )
-        return pca_vec.to(orig_dtype)
 
     # ------------------------------------------------------------------
     # Persistence

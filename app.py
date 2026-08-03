@@ -22,6 +22,13 @@ from src.evaluator import (
     plot_metric_comparison,
     plot_steering_strength,
 )
+from src.concept_extractors import (
+    ConceptVectorComparer,
+    plot_memory_comparison,
+    plot_pairwise_cosine_heatmap,
+    plot_runtime_comparison,
+    plot_vector_magnitude_comparison,
+)
 from src.layer_selector import (
     LayerScoreResult,
     LayerSelector,
@@ -30,6 +37,7 @@ from src.layer_selector import (
     plot_top_k_layers_bar,
 )
 from src.utils import compute_layer_weights, get_logger
+
 
 logger = get_logger("app")
 
@@ -373,11 +381,30 @@ selected_concept = st.sidebar.selectbox(
 )
 
 # Computation Method
-comp_method = st.sidebar.radio(
+comp_method_display = st.sidebar.selectbox(
     "Vector Computation Method",
-    options=["Mean Difference", "PCA"],
-    index=0
+    options=[
+        "Mean Difference",
+        "PCA",
+        "Linear Discriminant Analysis (LDA)",
+        "Logistic Regression",
+        "Linear SVM",
+        "Sparse PCA",
+        "Truncated SVD",
+    ],
+    index=0,
+    help="Algorithm used to compute steering concept vector."
 )
+method_key_map = {
+    "Mean Difference": "mean_diff",
+    "PCA": "pca",
+    "Linear Discriminant Analysis (LDA)": "lda",
+    "Logistic Regression": "logistic_regression",
+    "Linear SVM": "linear_svm",
+    "Sparse PCA": "sparse_pca",
+    "Truncated SVD": "truncated_svd",
+}
+comp_method_key = method_key_map[comp_method_display]
 
 # Trigger manual vector extraction
 extract_clicked = st.sidebar.button(
@@ -385,13 +412,19 @@ extract_clicked = st.sidebar.button(
     help="Re-runs activation extraction over contrasting pairs."
 )
 
-# Maintain computed concept vectors & layer scores in session state
+benchmark_clicked = st.sidebar.button(
+    "🔬 Benchmark All 7 Extraction Methods",
+    help="Executes and compares all 7 extraction algorithms on the concept dataset."
+)
+
+# Maintain computed concept vectors, layer scores & benchmarks in session state
 if "concept_vectors" not in st.session_state:
     st.session_state.concept_vectors = {}
     st.session_state.vector_concept_name = ""
     st.session_state.vector_method = ""
     st.session_state.layer_scores_cache = {}
     st.session_state.all_method_scores = {}
+    st.session_state.extractor_benchmark_results = {}
 
 # Handle Automatic Layer Selection Scoring & Top-K determination
 if layer_selection_mode == "Automatic Mode":
@@ -445,19 +478,42 @@ if layer_selection_mode == "Automatic Mode":
     else:
         target_layers = [i for i in range(num_layers // 3, num_layers // 2)]
 
+# Handle Extraction Algorithm Benchmarking
+if benchmark_clicked:
+    with st.spinner("Benchmarking all 7 extraction algorithms..."):
+        try:
+            mid_layer = target_layers[len(target_layers) // 2] if target_layers else num_layers // 2
+            if model_name.startswith("Mock-Model"):
+                pos_sample = torch.randn(12, 4096) + 1.5
+                neg_sample = torch.randn(12, 4096) - 1.5
+            elif "pos_acts_cache" in st.session_state and mid_layer in st.session_state.pos_acts_cache:
+                pos_sample = st.session_state.pos_acts_cache[mid_layer]
+                neg_sample = st.session_state.neg_acts_cache[mid_layer]
+            else:
+                extractor = ActivationExtractor(model, tokenizer, [mid_layer], config.device)
+                pos_b, neg_b = extractor.extract_contrastive(CONCEPT_PAIRS[selected_concept])
+                pos_sample, neg_sample = pos_b[mid_layer], neg_b[mid_layer]
+
+            st.session_state.extractor_benchmark_results = ConceptVectorComparer.benchmark_all_methods(
+                pos_sample, neg_sample, normalize=False
+            )
+            st.sidebar.success("✅ All 7 extraction algorithms benchmarked!")
+        except Exception as e:
+            st.sidebar.error(f"Benchmarking failed: {e}")
+
 # Ensure we have active concept vectors for target_layers
-vector_filename = f"{selected_concept.lower().replace(' ', '_').replace('/', '_')}_{comp_method.lower().replace(' ', '_')}.pt"
+vector_filename = f"{selected_concept.lower().replace(' ', '_').replace('/', '_')}_{comp_method_key}.pt"
 vector_path = os.path.join(config.data_dir, vector_filename)
 
 compute_needed = (
     extract_clicked
     or selected_concept != st.session_state.vector_concept_name
-    or comp_method != st.session_state.vector_method
+    or comp_method_key != st.session_state.vector_method
     or not os.path.exists(vector_path)
 )
 
 if compute_needed and len(target_layers) > 0:
-    with st.spinner("Computing concept vectors for target layers..."):
+    with st.spinner(f"Computing concept vectors using {comp_method_display}..."):
         try:
             if model_name.startswith("Mock-Model"):
                 sim_vectors = {}
@@ -467,7 +523,7 @@ if compute_needed and len(target_layers) > 0:
                     sim_vectors,
                     config.data_dir,
                     vector_filename,
-                    metadata={"model_name": model_name, "concept": selected_concept, "method": comp_method, "mock": True},
+                    metadata={"model_name": model_name, "concept": selected_concept, "method": comp_method_key, "mock": True},
                 )
             else:
                 extractor = ActivationExtractor(model, tokenizer, target_layers, config.device)
@@ -475,14 +531,9 @@ if compute_needed and len(target_layers) > 0:
 
                 computed_vectors = {}
                 for layer in target_layers:
-                    if comp_method == "Mean Difference":
-                        computed_vectors[layer] = ConceptVectorEngine.compute_mean_difference(
-                            pos_acts[layer], neg_acts[layer]
-                        )
-                    else:
-                        computed_vectors[layer] = ConceptVectorEngine.compute_pca_vector(
-                            pos_acts[layer], neg_acts[layer]
-                        )
+                    computed_vectors[layer] = ConceptVectorEngine.compute_vector(
+                        comp_method_key, pos_acts[layer], neg_acts[layer]
+                    )
                 ConceptVectorEngine.save_vectors(
                     computed_vectors,
                     config.data_dir,
@@ -490,17 +541,18 @@ if compute_needed and len(target_layers) > 0:
                     metadata={
                         "model_name": model_name,
                         "concept": selected_concept,
-                        "method": comp_method,
+                        "method": comp_method_key,
                         "layers": target_layers,
                     },
                 )
 
             st.session_state.concept_vectors = ConceptVectorEngine.load_vectors(vector_path)
             st.session_state.vector_concept_name = selected_concept
-            st.session_state.vector_method = comp_method
-            st.sidebar.success("Concept vector computed & cached!")
+            st.session_state.vector_method = comp_method_key
+            st.sidebar.success(f"Concept vector computed ({comp_method_display}) & cached!")
         except Exception as e:
             st.sidebar.error(f"Error computing concept vector: {e}")
+
 
 
 # Apply state variables to mock tokenizer if necessary
@@ -658,11 +710,12 @@ if generate_clicked and len(target_layers) > 0:
 
 st.subheader("📊 Steering Analytics & Activation Trajectory")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Adaptive Layer Weights & Vector Magnitudes",
     "Latent Trajectory Projection",
     "Research Evaluation Metrics & Charts",
-    "Automatic Layer Selection & Ranking"
+    "Automatic Layer Selection & Ranking",
+    "Concept Extractor Benchmark & Comparison"
 ])
 
 with tab1:
@@ -803,6 +856,38 @@ with tab4:
         st.dataframe(table_data, use_container_width=True)
     else:
         st.info("Switch to **Automatic Mode** in the sidebar to compute and visualize statistical layer scores.")
+
+with tab5:
+    st.markdown("### 🔬 Concept Extractor Benchmark & Multi-Method Comparison")
+
+    if "extractor_benchmark_results" in st.session_state and st.session_state.extractor_benchmark_results:
+        bench_res = st.session_state.extractor_benchmark_results
+        labels, cos_matrix = ConceptVectorComparer.compute_pairwise_cosine_matrix(bench_res)
+
+        st.plotly_chart(plot_pairwise_cosine_heatmap(labels, cos_matrix), use_container_width=True)
+
+        bcol1, bcol2 = st.columns(2)
+        with bcol1:
+            st.plotly_chart(plot_runtime_comparison(bench_res), use_container_width=True)
+        with bcol2:
+            st.plotly_chart(plot_memory_comparison(bench_res), use_container_width=True)
+
+        st.plotly_chart(plot_vector_magnitude_comparison(bench_res), use_container_width=True)
+
+        st.markdown("#### Benchmark Summary Table")
+        summary_table = [
+            {
+                "Method": r.display_name,
+                "Vector L2 Norm": f"{r.vector_norm:.4f}",
+                "Runtime (ms)": f"{r.runtime_ms:.3f}",
+                "Memory (KB)": f"{r.memory_kb:.2f}",
+            }
+            for r in bench_res.values()
+        ]
+        st.dataframe(summary_table, use_container_width=True)
+    else:
+        st.info("Click **🔬 Benchmark All 7 Extraction Methods** in the sidebar to run multi-method comparisons.")
+
 
 
 
