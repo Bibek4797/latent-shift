@@ -25,7 +25,8 @@ def main():
     print("=== LatentShift Example 2: Adaptive Multi-Layer Steering ===")
 
     model_name = "gpt2"
-    model, tokenizer, config = load_model_and_tokenizer(model_name)
+    model, tokenizer = load_model_and_tokenizer(model_name)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     target_layers = [4, 5, 6, 7, 8, 9]
 
@@ -39,7 +40,7 @@ def main():
     pos_prompts = ["I am feeling happy, creative, and full of inspiration."]
     neg_prompts = ["I am feeling uninspired, dull, and completely unmotivated."]
 
-    extractor = ActivationExtractor(model, tokenizer, target_layers, device=config.device)
+    extractor = ActivationExtractor(model, tokenizer, target_layers, device=device)
     pos_acts, neg_acts = extractor.extract_contrastive(list(zip(pos_prompts, neg_prompts)))
 
     vectors = {
@@ -49,7 +50,7 @@ def main():
 
     # Generate under Cosine Decay strategy
     prompt = "Today I decided to start a new project because"
-    generator = SteeredGenerator(model, tokenizer, device=config.device)
+    generator = SteeredGenerator(model, tokenizer, device=device)
 
     baseline, steered = generator.generate_comparative(
         prompt=prompt,

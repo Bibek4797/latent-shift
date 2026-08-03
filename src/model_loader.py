@@ -12,7 +12,7 @@ Handles:
 
 import gc
 import logging
-from typing import Tuple
+from typing import Tuple, Union
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 
 
 def load_model_and_tokenizer(
-    config: SteeringConfig,
+    model_name_or_config: Union[str, SteeringConfig],
     load_in_4bit: bool = False,
     load_in_8bit: bool = False,
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
@@ -36,8 +36,8 @@ def load_model_and_tokenizer(
 
     Parameters
     ----------
-    config : SteeringConfig
-        System-wide configuration with model name, device, and dtype.
+    model_name_or_config : Union[str, SteeringConfig]
+        Model identifier string (e.g., "gpt2") or system SteeringConfig instance.
     load_in_4bit : bool, default=False
         Enable 4-bit NF4 quantization via bitsandbytes (requires CUDA).
     load_in_8bit : bool, default=False
@@ -57,6 +57,10 @@ def load_model_and_tokenizer(
     RuntimeError
         If 4-bit / 8-bit quantization is requested without a CUDA device.
     """
+    if isinstance(model_name_or_config, str):
+        config = SteeringConfig(model_name=model_name_or_config)
+    else:
+        config = model_name_or_config
     # ---- Pre-load cleanup --------------------------------------------------
     gc.collect()
     if torch.cuda.is_available():

@@ -23,7 +23,8 @@ def main():
     print("=== LatentShift Example 4: Automatic Layer Selection ===")
 
     model_name = "gpt2"
-    model, tokenizer, config = load_model_and_tokenizer(model_name)
+    model, tokenizer = load_model_and_tokenizer(model_name)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     all_layers = list(range(12))
 
@@ -37,7 +38,7 @@ def main():
     ]
 
     print("Extracting activations across all 12 layers...")
-    extractor = ActivationExtractor(model, tokenizer, all_layers, device=config.device)
+    extractor = ActivationExtractor(model, tokenizer, all_layers, device=device)
     pos_acts, neg_acts = extractor.extract_contrastive(list(zip(pos_prompts, neg_prompts)))
 
     selector = LayerSelector(pos_acts, neg_acts)

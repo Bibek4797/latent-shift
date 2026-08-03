@@ -29,18 +29,19 @@ def main():
     print("=== LatentShift Example 3: Dynamic Closed-Loop Steering ===")
 
     model_name = "gpt2"
-    model, tokenizer, config = load_model_and_tokenizer(model_name)
+    model, tokenizer = load_model_and_tokenizer(model_name)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     target_layers = [6, 7, 8]
 
     # Extract concept vectors
     pos_prompts = ["Always answer with absolute honesty, clarity, and truth."]
     neg_prompts = ["Answer with deceptive claims, false rumors, and lies."]
 
-    extractor = ActivationExtractor(model, tokenizer, target_layers, device=config.device)
+    extractor = ActivationExtractor(model, tokenizer, target_layers, device=device)
     pos_acts, neg_acts = extractor.extract_contrastive(list(zip(pos_prompts, neg_prompts)))
     vectors = {l: ConceptVectorEngine.compute_vector("pca", pos_acts[l], neg_acts[l], normalize=True) for l in target_layers}
 
-    generator = SteeredGenerator(model, tokenizer, device=config.device)
+    generator = SteeredGenerator(model, tokenizer, device=device)
     prompt = "The scientific consensus on global climate change is"
 
     # 1. Cosine Scheduler (Smooth Annealing)

@@ -23,13 +23,14 @@ def main():
     print("=== LatentShift Example 5: Multi-Method Concept Extraction Benchmark ===")
 
     model_name = "gpt2"
-    model, tokenizer, config = load_model_and_tokenizer(model_name)
+    model, tokenizer = load_model_and_tokenizer(model_name)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     layer = 6
 
     pos_prompts = ["Scientific research drives discovery, innovation, and technological progress."]
     neg_prompts = ["Scientific research is worthless, meaningless, and completely useless."]
 
-    extractor = ActivationExtractor(model, tokenizer, [layer], device=config.device)
+    extractor = ActivationExtractor(model, tokenizer, [layer], device=device)
     pos_acts, neg_acts = extractor.extract_contrastive(list(zip(pos_prompts, neg_prompts)))
 
     h_pos = pos_acts[layer]

@@ -26,7 +26,8 @@ def main():
     # 1. Load model and tokenizer
     model_name = "gpt2"
     print(f"Loading {model_name}...")
-    model, tokenizer, config = load_model_and_tokenizer(model_name)
+    model, tokenizer = load_model_and_tokenizer(model_name)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 2. Define contrastive prompt sets for positivity steering
     pos_prompts = [
@@ -44,7 +45,7 @@ def main():
 
     # 3. Extract activations
     print(f"Extracting activations across layers {target_layers}...")
-    extractor = ActivationExtractor(model, tokenizer, target_layers, device=config.device)
+    extractor = ActivationExtractor(model, tokenizer, target_layers, device=device)
     pos_acts, neg_acts = extractor.extract_contrastive(list(zip(pos_prompts, neg_prompts)))
 
     # 4. Compute concept vectors using Mean Difference
@@ -59,7 +60,7 @@ def main():
     prompt = "The weather outside is rainy, but"
     print(f"\nPrompt: '{prompt}'")
 
-    generator = SteeredGenerator(model, tokenizer, device=config.device)
+    generator = SteeredGenerator(model, tokenizer, device=device)
     baseline, steered = generator.generate_comparative(
         prompt=prompt,
         vectors=vectors,
