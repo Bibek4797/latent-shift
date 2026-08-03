@@ -36,6 +36,19 @@ from src.layer_selector import (
     plot_top_k_layers_bar,
 )
 from src.model_loader import load_model_and_tokenizer
+from src.schedulers import (
+    SCHEDULER_REGISTRY,
+    AlphaTrajectory,
+    BaseAlphaScheduler,
+    ConfidenceBasedScheduler,
+    CosineScheduler,
+    EntropyBasedScheduler,
+    FixedScheduler,
+    LinearScheduler,
+    build_scheduler,
+    plot_alpha_trajectory,
+    plot_token_steering_strength,
+)
 from src.steer import SteeredGenerator
 from src.utils import compute_layer_weights, get_logger, normalize_vector, set_seed
 
@@ -58,6 +71,19 @@ __all__ = [
     "BenchmarkEngine",
     "SingleBenchmarkRun",
     "BenchmarkGridConfig",
+    # Schedulers (Dynamic Closed-Loop Steering)
+    "BaseAlphaScheduler",
+    "FixedScheduler",
+    "LinearScheduler",
+    "CosineScheduler",
+    "ConfidenceBasedScheduler",
+    "EntropyBasedScheduler",
+    "AlphaTrajectory",
+    "SCHEDULER_REGISTRY",
+    "build_scheduler",
+    "plot_alpha_trajectory",
+    "plot_token_steering_strength",
+    # Evaluation & visualization
     "plot_layerwise_changes",
     "plot_metric_comparison",
     "plot_steering_strength",
@@ -77,8 +103,3 @@ __all__ = [
     "set_seed",
     "normalize_vector",
 ]
-
-
-
-
-

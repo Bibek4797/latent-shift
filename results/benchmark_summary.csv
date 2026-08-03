@@ -1,0 +1,9 @@
+run_id,model_name,concept,extraction_method,steering_strategy,alpha,layers,prompt,ppl_baseline,ppl_steered,delta_ppl,ppl_ratio,cosine_sim,kl_divergence,js_divergence,entropy_baseline,entropy_steered,steering_strength_score,runtime_ms,cpu_memory_mb,gpu_memory_mb,timestamp
+run_001,gpt2,positivity,mean_diff,uniform,1.0,"[6, 7, 8]",How are you today?,11.7971,16.6248,4.8276,1.4092,0.8796,5.8169,0.5305,3.9269,3.847,0.0,15428.09,0.05,0.0,2026-08-03 17:18:50 UTC
+run_002,gpt2,positivity,mean_diff,uniform,2.0,"[6, 7, 8]",How are you today?,11.7971,18.3566,6.5595,1.556,0.8382,5.4919,0.5202,3.9269,3.6043,0.0,22016.77,0.05,0.0,2026-08-03 17:19:42 UTC
+run_003,gpt2,positivity,mean_diff,cosine_decay,1.0,"[6, 7, 8]",How are you today?,11.7971,9.4645,-2.3326,0.8023,0.9184,5.0227,0.4792,3.9269,4.4033,0.0,17937.33,0.05,0.0,2026-08-03 17:20:20 UTC
+run_004,gpt2,positivity,mean_diff,cosine_decay,2.0,"[6, 7, 8]",How are you today?,11.7971,14.037,2.2399,1.1899,0.9075,6.7951,0.5408,3.9269,4.5233,0.0,13796.86,0.05,0.0,2026-08-03 17:20:58 UTC
+run_005,gpt2,positivity,lda,uniform,1.0,"[6, 7, 8]",How are you today?,11.7971,31.8305,20.0334,2.6982,0.8168,4.2284,0.5128,3.9269,4.4384,0.0,20673.15,0.05,0.0,2026-08-03 17:21:48 UTC
+run_006,gpt2,positivity,lda,uniform,2.0,"[6, 7, 8]",How are you today?,11.7971,111.7828,99.9857,9.4754,0.7518,3.3997,0.4601,3.9269,5.4705,0.0,22151.67,0.05,0.0,2026-08-03 17:22:43 UTC
+run_007,gpt2,positivity,lda,cosine_decay,1.0,"[6, 7, 8]",How are you today?,11.7971,116.4236,104.6265,9.8688,0.8711,4.0103,0.5082,3.9269,5.2814,0.0,22010.07,0.05,0.0,2026-08-03 17:23:38 UTC
+run_008,gpt2,positivity,lda,cosine_decay,2.0,"[6, 7, 8]",How are you today?,11.7971,184.261,172.4639,15.6191,0.8105,3.5429,0.4523,3.9269,5.1366,0.0,22210.69,0.05,0.0,2026-08-03 17:24:33 UTC

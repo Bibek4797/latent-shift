@@ -56,6 +56,7 @@ from src.evaluator import SteeringEvaluator
 from src.extractor import ActivationExtractor
 from src.layer_selector import LayerSelector
 from src.model_loader import load_model_and_tokenizer
+from src.schedulers import build_scheduler
 from src.steer import SteeredGenerator
 from src.utils import get_logger, set_seed
 
@@ -252,6 +253,51 @@ def parse_args() -> argparse.Namespace:
         default=[1.0, 2.0, 3.0],
         help="Alpha scaling values to sweep over in benchmark mode.",
     )
+
+    # --- Dynamic Closed-Loop Steering ---
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default="fixed",
+        choices=["fixed", "linear", "cosine", "confidence", "entropy"],
+        help="Dynamic alpha scheduler for closed-loop steering.",
+    )
+    parser.add_argument(
+        "--scheduler_alpha_start",
+        type=float,
+        default=3.0,
+        help="Starting alpha for linear scheduler.",
+    )
+    parser.add_argument(
+        "--scheduler_alpha_end",
+        type=float,
+        default=0.5,
+        help="Ending alpha for linear scheduler.",
+    )
+    parser.add_argument(
+        "--scheduler_alpha_max",
+        type=float,
+        default=3.0,
+        help="Max alpha for cosine/entropy schedulers.",
+    )
+    parser.add_argument(
+        "--scheduler_alpha_min",
+        type=float,
+        default=0.3,
+        help="Min alpha for cosine/entropy schedulers.",
+    )
+    parser.add_argument(
+        "--scheduler_alpha_base",
+        type=float,
+        default=2.0,
+        help="Base alpha for confidence scheduler.",
+    )
+    parser.add_argument(
+        "--scheduler_gamma",
+        type=float,
+        default=1.0,
+        help="Gamma sensitivity for confidence scheduler.",
+    )
     return parser.parse_args()
 
 
@@ -430,18 +476,45 @@ def main() -> None:
         print("=" * 60)
         return
 
-    # ---- Comparative Generation --------------------------------------------
-    logger.info("Running comparative generation...")
-    baseline, steered = generator.generate_comparative(
-        prompt=args.prompt,
-        vectors=concept_vectors,
-        alpha=args.alpha,
-        strategy=args.strategy,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        seed=args.seed,
-    )
+    # ---- Comparative Generation (Static or Dynamic) -------------------------
+    alpha_trajectory = None
+    if args.scheduler != "fixed":
+        # Build the scheduler with user-specified parameters
+        sched_kwargs = {}
+        if args.scheduler == "linear":
+            sched_kwargs = {"alpha_start": args.scheduler_alpha_start, "alpha_end": args.scheduler_alpha_end}
+        elif args.scheduler == "cosine":
+            sched_kwargs = {"alpha_max": args.scheduler_alpha_max, "alpha_min": args.scheduler_alpha_min}
+        elif args.scheduler == "confidence":
+            sched_kwargs = {"alpha_base": args.scheduler_alpha_base, "gamma": args.scheduler_gamma}
+        elif args.scheduler == "entropy":
+            sched_kwargs = {"alpha_min": args.scheduler_alpha_min, "alpha_max": args.scheduler_alpha_max}
+
+        scheduler = build_scheduler(args.scheduler, **sched_kwargs)
+        logger.info("Dynamic Closed-Loop Steering enabled | scheduler=%s", args.scheduler)
+
+        baseline, steered, alpha_trajectory = generator.generate_comparative_dynamic(
+            prompt=args.prompt,
+            vectors=concept_vectors,
+            scheduler=scheduler,
+            strategy=args.strategy,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            seed=args.seed,
+        )
+    else:
+        logger.info("Running comparative generation (fixed alpha)...")
+        baseline, steered = generator.generate_comparative(
+            prompt=args.prompt,
+            vectors=concept_vectors,
+            alpha=args.alpha,
+            strategy=args.strategy,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            seed=args.seed,
+        )
 
 
 
@@ -465,12 +538,23 @@ def main() -> None:
     print("=" * 60)
     print(f"\nPrompt:\n  {args.prompt}\n")
     print(f"[BASELINE]\n{baseline}\n")
-    print(f"[STEERED  | concept={args.concept} | alpha={args.alpha} | strategy={args.strategy}]\n{steered}\n")
+    sched_label = args.scheduler if args.scheduler != "fixed" else f"alpha={args.alpha}"
+    print(f"[STEERED  | concept={args.concept} | {sched_label} | strategy={args.strategy}]\n{steered}\n")
     print("Evaluation Metrics:")
     for k, v in report_dict.items():
         if isinstance(v, dict):
             continue  # Print scalar metrics in summary
         print(f"  {k:<26}: {v}")
+
+    if alpha_trajectory:
+        traj = alpha_trajectory.to_dict()
+        print(f"\nDynamic Alpha Trajectory:")
+        print(f"  Scheduler           : {traj['scheduler_name']}")
+        print(f"  Steps               : {traj['num_steps']}")
+        print(f"  Alpha Mean          : {traj['alpha_mean']:.4f}")
+        print(f"  Alpha Min           : {traj['alpha_min']:.4f}")
+        print(f"  Alpha Max           : {traj['alpha_max']:.4f}")
+        print(f"  Alpha Std           : {traj['alpha_std']:.4f}")
     print("=" * 60)
 
     # ---- Save JSON Report --------------------------------------------------
@@ -487,6 +571,7 @@ def main() -> None:
             "method": args.method,
             "alpha": args.alpha,
             "strategy": args.strategy,
+            "scheduler": args.scheduler,
             "layers": args.layers,
             "seed": args.seed,
             "normalize": args.normalize,
@@ -497,6 +582,8 @@ def main() -> None:
         "steered": steered,
         "metrics": report_dict,
     }
+    if alpha_trajectory:
+        results["alpha_trajectory"] = alpha_trajectory.to_dict()
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 

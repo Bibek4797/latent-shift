@@ -338,6 +338,124 @@ print(f"📊 Steered Perplexity: {ppl:.3f}")
 
 ---
 
+## 🔄 Dynamic Closed-Loop Steering
+
+Traditional activation steering applies a **fixed** steering coefficient α throughout the entire generation. Dynamic Closed-Loop Steering introduces **token-level alpha adaptation**, where α evolves during autoregressive decoding based on a configurable scheduler.
+
+### Mathematical Formulation
+
+At each decoding step *t*, the steered hidden state is computed as:
+
+```
+h_steered(t) = h_original(t) + α(t) × ratio_i × v_concept_i
+```
+
+where:
+- **α(t)** is the dynamic coefficient produced by the scheduler at step *t*
+- **ratio_i** is the per-layer weight ratio from the adaptive weighting strategy
+- **v_concept_i** is the concept vector for layer *i*
+
+### Built-in Schedulers
+
+| Scheduler | Formula | Description |
+|-----------|---------|-------------|
+| **Fixed** | α(t) = α | Constant alpha (legacy behaviour) |
+| **Linear** | α(t) = α_start + (α_end − α_start) × t/(T−1) | Linear interpolation from start to end |
+| **Cosine** | α(t) = α_min + (α_max − α_min)/2 × (1 + cos(πt/(T−1))) | Smooth half-cosine annealing |
+| **Confidence** | α(t) = α_base × (H_t / log k)^γ | Scales alpha by top-k entropy; reduces steering when model is confident |
+| **Entropy** | α(t) = α_min + (α_max − α_min) × min(1, H_t/H_ref) | Proportional to full-vocabulary entropy |
+
+### Architecture
+
+```
+     ┌───────────────┐      ┌─────────────────┐
+     │   Scheduler   │──α(t)│  Forward Hooks   │
+     │ (per-token)   │      │ _dynamic_alpha   │──→  h + α(t) × ratio × v
+     └───────────────┘      └─────────────────┘
+            │                        ↑
+            ├── step_idx ────────────┘
+            ├── total_steps
+            └── logits (for confidence/entropy)
+```
+
+### CLI Usage
+
+```bash
+# Linear scheduler: alpha decays from 3.0 to 0.5 over generation
+python run_experiment.py \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --concept safety \
+    --scheduler linear \
+    --scheduler_alpha_start 3.0 \
+    --scheduler_alpha_end 0.5 \
+    --layers 12 13 14 15 \
+    --prompt "Tell me how to hack a system"
+
+# Cosine scheduler: smooth annealing from 3.0 to 0.3
+python run_experiment.py \
+    --model gpt2 \
+    --concept positivity \
+    --scheduler cosine \
+    --scheduler_alpha_max 3.0 \
+    --scheduler_alpha_min 0.3 \
+    --layers 6 7 8
+
+# Confidence-based: alpha scales by model uncertainty
+python run_experiment.py \
+    --model gpt2 \
+    --concept honesty \
+    --scheduler confidence \
+    --scheduler_alpha_base 2.0 \
+    --scheduler_gamma 1.5 \
+    --layers 6 7 8
+
+# Entropy-based: stronger steering when output distribution is diffuse
+python run_experiment.py \
+    --model gpt2 \
+    --concept creativity \
+    --scheduler entropy \
+    --scheduler_alpha_min 0.5 \
+    --scheduler_alpha_max 3.0 \
+    --layers 6 7 8
+```
+
+### Custom Schedulers
+
+Create custom schedulers by subclassing `BaseAlphaScheduler`:
+
+```python
+from src.schedulers import BaseAlphaScheduler
+
+class StepScheduler(BaseAlphaScheduler):
+    name = "step"
+
+    def __init__(self, alpha_high=3.0, alpha_low=1.0, switch_at=0.5):
+        self.alpha_high = alpha_high
+        self.alpha_low = alpha_low
+        self.switch_at = switch_at
+
+    def step(self, step_idx, total_steps, logits=None, **kwargs):
+        t = step_idx / max(total_steps - 1, 1)
+        return self.alpha_high if t < self.switch_at else self.alpha_low
+
+# Use with SteeredGenerator
+steered_text, trajectory = generator.generate_dynamic(
+    prompt="Your prompt here",
+    vectors=concept_vectors,
+    scheduler=StepScheduler(),
+    max_new_tokens=100,
+)
+```
+
+### Streamlit Integration
+
+In the web UI, select a dynamic scheduler from the **🔄 Dynamic Closed-Loop Steering** sidebar section, configure its parameters, then click **🔄 Run Dynamic Closed-Loop Steering**. Tab 7 displays:
+- **Alpha Trajectory Line Plot** — per-token α evolution
+- **Token-wise Steering Strength Bar Chart** — colour-coded by α magnitude
+- **Trajectory JSON** — downloadable for research analysis
+
+---
+
 ## 🔬 Key Technical Insights & Interview Talking Points
 
 If presenting this project in AI research labs or machine learning engineering interviews:
@@ -355,6 +473,10 @@ If presenting this project in AI research labs or machine learning engineering i
 
 4. **Robust Hook Lifecycles & Memory Management**:
    - Forward hooks can cause silent CUDA memory retention if unremoved. `SteeredGenerator` encapsulates inference within a `try...finally` block to guarantee `hook.remove()` is called even if generation crashes.
+
+5. **Dynamic Closed-Loop Steering**:
+   - Fixed-alpha steering can over-steer early tokens (when the model needs guidance least) and under-steer later tokens (when generation drift is most likely). Dynamic schedulers address this by adapting α to the model's confidence, entropy, or generation position.
+   - Confidence-based and entropy-based schedulers create a **feedback loop**: the model's own output uncertainty directly controls steering intensity, implementing closed-loop control theory principles in the latent space.
 
 ---
 

@@ -102,12 +102,16 @@ class _DummyTokenizer:
     pad_token = "<pad>"
     eos_token = "<eos>"
     pad_token_id = 0
+    eos_token_id = 1
     vocab_size = 100
     padding_side = "left"
 
     def __call__(self, text, return_tensors="pt"):
         ids = torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long)
         return {"input_ids": ids}
+
+    def decode(self, token_ids, skip_special_tokens=True):
+        return "dummy decoded text"
 
 
 # ===========================================================================
@@ -607,9 +611,269 @@ class TestBenchmarkEngine(unittest.TestCase):
         self.assertIsNotNone(fig_lead)
 
 
+# ===========================================================================
+# TEST: Dynamic Closed-Loop Steering Schedulers
+# ===========================================================================
+
+class TestSchedulers(unittest.TestCase):
+    """Validate all alpha scheduler implementations and factory."""
+
+    def test_fixed_scheduler_returns_constant(self):
+        from src.schedulers import FixedScheduler
+        sched = FixedScheduler(alpha=2.5)
+        for step in range(20):
+            self.assertAlmostEqual(sched.step(step, 20), 2.5)
+
+    def test_linear_scheduler_endpoints(self):
+        from src.schedulers import LinearScheduler
+        sched = LinearScheduler(alpha_start=4.0, alpha_end=1.0)
+        self.assertAlmostEqual(sched.step(0, 100), 4.0, places=5)
+        self.assertAlmostEqual(sched.step(99, 100), 1.0, places=5)
+
+    def test_linear_scheduler_midpoint(self):
+        from src.schedulers import LinearScheduler
+        sched = LinearScheduler(alpha_start=4.0, alpha_end=0.0)
+        mid = sched.step(50, 101)
+        self.assertAlmostEqual(mid, 2.0, places=3)
+
+    def test_linear_scheduler_single_step(self):
+        from src.schedulers import LinearScheduler
+        sched = LinearScheduler(alpha_start=3.0, alpha_end=1.0)
+        self.assertAlmostEqual(sched.step(0, 1), 3.0)
+
+    def test_cosine_scheduler_endpoints(self):
+        from src.schedulers import CosineScheduler
+        sched = CosineScheduler(alpha_max=3.0, alpha_min=0.0)
+        self.assertAlmostEqual(sched.step(0, 100), 3.0, places=4)
+        self.assertAlmostEqual(sched.step(99, 100), 0.0, places=4)
+
+    def test_cosine_scheduler_symmetry(self):
+        """Cosine schedule should be symmetric around the midpoint."""
+        from src.schedulers import CosineScheduler
+        sched = CosineScheduler(alpha_max=4.0, alpha_min=0.0)
+        val_quarter = sched.step(25, 101)
+        val_three_quarter = sched.step(75, 101)
+        self.assertAlmostEqual(val_quarter + val_three_quarter, 4.0, places=3)
+
+    def test_cosine_scheduler_single_step(self):
+        from src.schedulers import CosineScheduler
+        sched = CosineScheduler(alpha_max=5.0, alpha_min=1.0)
+        self.assertAlmostEqual(sched.step(0, 1), 5.0)
+
+    def test_confidence_scheduler_no_logits_returns_base(self):
+        from src.schedulers import ConfidenceBasedScheduler
+        sched = ConfidenceBasedScheduler(alpha_base=2.0)
+        self.assertAlmostEqual(sched.step(0, 10, logits=None), 2.0)
+
+    def test_confidence_scheduler_with_peaked_logits(self):
+        """Peaked distribution (low entropy) should yield alpha < base."""
+        from src.schedulers import ConfidenceBasedScheduler
+        sched = ConfidenceBasedScheduler(alpha_base=2.0, gamma=1.0, top_k=10)
+        logits = torch.full((100,), -100.0)
+        logits[0] = 100.0  # One dominant token
+        alpha = sched.step(0, 10, logits=logits)
+        self.assertLess(alpha, 2.0)
+
+    def test_confidence_scheduler_with_flat_logits(self):
+        """Flat distribution (high entropy) should yield alpha close to base."""
+        from src.schedulers import ConfidenceBasedScheduler
+        sched = ConfidenceBasedScheduler(alpha_base=2.0, gamma=1.0, top_k=50)
+        logits = torch.zeros(100)  # Uniform distribution
+        alpha = sched.step(0, 10, logits=logits)
+        self.assertGreater(alpha, 1.5)
+
+    def test_entropy_scheduler_no_logits_returns_midpoint(self):
+        from src.schedulers import EntropyBasedScheduler
+        sched = EntropyBasedScheduler(alpha_min=1.0, alpha_max=3.0)
+        self.assertAlmostEqual(sched.step(0, 10, logits=None), 2.0)
+
+    def test_entropy_scheduler_low_entropy(self):
+        """Peaked distribution → close to alpha_min."""
+        from src.schedulers import EntropyBasedScheduler
+        sched = EntropyBasedScheduler(alpha_min=0.5, alpha_max=3.0)
+        logits = torch.full((100,), -100.0)
+        logits[0] = 100.0
+        alpha = sched.step(0, 10, logits=logits)
+        self.assertLess(alpha, 1.0)
+
+    def test_entropy_scheduler_high_entropy(self):
+        """Flat distribution → close to alpha_max."""
+        from src.schedulers import EntropyBasedScheduler
+        sched = EntropyBasedScheduler(alpha_min=0.5, alpha_max=3.0, h_ref=4.0)
+        logits = torch.zeros(1000)  # Nearly uniform
+        alpha = sched.step(0, 10, logits=logits)
+        self.assertGreater(alpha, 2.5)
+
+    def test_build_scheduler_factory_all_types(self):
+        from src.schedulers import build_scheduler
+        for name in ["fixed", "linear", "cosine", "confidence", "entropy"]:
+            sched = build_scheduler(name)
+            self.assertEqual(sched.name, name)
+
+    def test_build_scheduler_unknown_raises(self):
+        from src.schedulers import build_scheduler
+        with self.assertRaises(ValueError):
+            build_scheduler("nonexistent_scheduler")
+
+    def test_build_scheduler_with_kwargs(self):
+        from src.schedulers import build_scheduler
+        sched = build_scheduler("linear", alpha_start=5.0, alpha_end=0.0)
+        self.assertAlmostEqual(sched.step(0, 10), 5.0)
+
+    def test_scheduler_monotonicity_linear(self):
+        """Linear scheduler should monotonically decrease (start > end)."""
+        from src.schedulers import LinearScheduler
+        sched = LinearScheduler(alpha_start=5.0, alpha_end=1.0)
+        values = [sched.step(i, 50) for i in range(50)]
+        for i in range(1, len(values)):
+            self.assertLessEqual(values[i], values[i - 1] + 1e-9)
+
+    def test_scheduler_monotonicity_cosine(self):
+        """Cosine scheduler should monotonically decrease."""
+        from src.schedulers import CosineScheduler
+        sched = CosineScheduler(alpha_max=5.0, alpha_min=0.0)
+        values = [sched.step(i, 50) for i in range(50)]
+        for i in range(1, len(values)):
+            self.assertLessEqual(values[i], values[i - 1] + 1e-9)
+
+
+class TestAlphaTrajectory(unittest.TestCase):
+    """Validate alpha trajectory recording and serialization."""
+
+    def test_record_and_to_dict(self):
+        from src.schedulers import AlphaTrajectory
+        traj = AlphaTrajectory(scheduler_name="test")
+        for v in [1.0, 2.0, 3.0]:
+            traj.record(v)
+        d = traj.to_dict()
+        self.assertEqual(d["scheduler_name"], "test")
+        self.assertEqual(d["num_steps"], 3)
+        self.assertAlmostEqual(d["alpha_mean"], 2.0, places=3)
+        self.assertAlmostEqual(d["alpha_min"], 1.0, places=3)
+        self.assertAlmostEqual(d["alpha_max"], 3.0, places=3)
+
+    def test_empty_trajectory(self):
+        from src.schedulers import AlphaTrajectory
+        traj = AlphaTrajectory(scheduler_name="empty")
+        d = traj.to_dict()
+        self.assertEqual(d["num_steps"], 0)
+        self.assertEqual(d["alpha_mean"], 0.0)
+
+
+class TestSchedulerPlotting(unittest.TestCase):
+    """Validate that plotting utilities produce valid Plotly figures."""
+
+    def test_plot_alpha_trajectory(self):
+        from src.schedulers import AlphaTrajectory, plot_alpha_trajectory
+        traj = AlphaTrajectory(scheduler_name="linear")
+        for i in range(10):
+            traj.record(3.0 - 0.3 * i)
+        fig = plot_alpha_trajectory(traj)
+        self.assertIsNotNone(fig)
+
+    def test_plot_token_steering_strength(self):
+        from src.schedulers import AlphaTrajectory, plot_token_steering_strength
+        traj = AlphaTrajectory(scheduler_name="cosine")
+        for i in range(5):
+            traj.record(2.0)
+        fig = plot_token_steering_strength(traj)
+        self.assertIsNotNone(fig)
+
+    def test_plot_with_token_labels(self):
+        from src.schedulers import AlphaTrajectory, plot_token_steering_strength
+        traj = AlphaTrajectory(scheduler_name="cosine")
+        for i in range(3):
+            traj.record(1.5)
+        fig = plot_token_steering_strength(traj, tokens=["Hello", "world", "!"])
+        self.assertIsNotNone(fig)
+
+
+class TestDynamicSteeringHooks(unittest.TestCase):
+    """Validate dynamic hook registration and alpha container update."""
+
+    def setUp(self):
+        self.model = _LlamaStyleModel(num_layers=4, hidden_dim=16)
+        self.tokenizer = _DummyTokenizer()
+        from src.steer import SteeredGenerator
+        self.gen = SteeredGenerator(self.model, self.tokenizer, device="cpu")
+
+    def test_dynamic_hooks_register_and_remove(self):
+        """Dynamic hooks should register and clean up properly."""
+        vectors = {0: torch.randn(16), 1: torch.randn(16)}
+        self.gen.register_dynamic_steering_hooks(vectors)
+        self.assertEqual(len(self.gen.active_hooks), 2)
+        self.gen.remove_steering_hooks()
+        self.assertEqual(len(self.gen.active_hooks), 0)
+
+    def test_dynamic_alpha_container_updates(self):
+        """Changing _dynamic_alpha should affect hook behavior."""
+        vectors = {0: torch.ones(16)}
+        self.gen.register_dynamic_steering_hooks(vectors, layer_weight_ratios={0: 1.0})
+
+        # Set alpha to 0 → output should be unaffected
+        self.gen._dynamic_alpha[0] = 0.0
+        x = torch.randn(1, 3, 16)
+        layer = self.model.model.layers[0]
+        out_base = layer(x)
+
+        # Set alpha to a large value → output should be shifted
+        self.gen._dynamic_alpha[0] = 10.0
+        out_steered = layer(x)
+
+        # The outputs should differ when alpha != 0
+        if isinstance(out_base, tuple):
+            diff = (out_steered[0] - out_base[0]).abs().sum().item()
+        else:
+            diff = (out_steered - out_base).abs().sum().item()
+        self.assertGreater(diff, 0.0)
+
+        self.gen.remove_steering_hooks()
+
+    def test_dynamic_hooks_with_ratios(self):
+        """Layer weight ratios should scale the effective alpha."""
+        vectors = {0: torch.ones(16), 1: torch.ones(16)}
+        ratios = {0: 0.5, 1: 2.0}
+        self.gen.register_dynamic_steering_hooks(vectors, layer_weight_ratios=ratios)
+        self.assertEqual(len(self.gen.active_hooks), 2)
+        self.gen.remove_steering_hooks()
+
+    def test_no_hook_leakage_after_dynamic(self):
+        """After dynamic generation flow, hooks should be cleaned."""
+        vectors = {0: torch.randn(16)}
+        self.gen.register_dynamic_steering_hooks(vectors)
+        self.gen.remove_steering_hooks()
+
+        # Verify no hooks remain on any layer
+        for layer in self.model.model.layers:
+            self.assertEqual(len(layer._forward_hooks), 0)
+
+
+class TestCustomScheduler(unittest.TestCase):
+    """Validate that custom schedulers can be created by subclassing."""
+
+    def test_custom_scheduler_subclass(self):
+        from src.schedulers import BaseAlphaScheduler
+
+        class StepScheduler(BaseAlphaScheduler):
+            name = "step"
+            def __init__(self, alpha_high=3.0, alpha_low=1.0, switch_at=0.5):
+                self.alpha_high = alpha_high
+                self.alpha_low = alpha_low
+                self.switch_at = switch_at
+
+            def step(self, step_idx, total_steps, logits=None, **kw):
+                t = step_idx / max(total_steps - 1, 1)
+                return self.alpha_high if t < self.switch_at else self.alpha_low
+
+        sched = StepScheduler()
+        self.assertAlmostEqual(sched.step(0, 10), 3.0)
+        self.assertAlmostEqual(sched.step(9, 10), 1.0)
+
+    def test_scheduler_registry_contains_builtins(self):
+        from src.schedulers import SCHEDULER_REGISTRY
+        for key in ["fixed", "linear", "cosine", "confidence", "entropy"]:
+            self.assertIn(key, SCHEDULER_REGISTRY)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
-
-
-

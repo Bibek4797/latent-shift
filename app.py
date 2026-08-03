@@ -45,6 +45,13 @@ from src.layer_selector import (
     plot_layer_scores_line,
     plot_top_k_layers_bar,
 )
+from src.schedulers import (
+    SCHEDULER_REGISTRY,
+    AlphaTrajectory,
+    build_scheduler,
+    plot_alpha_trajectory,
+    plot_token_steering_strength,
+)
 from src.utils import compute_layer_weights, get_logger
 
 
@@ -426,6 +433,46 @@ benchmark_clicked = st.sidebar.button(
     help="Executes and compares all 7 extraction algorithms on the concept dataset."
 )
 
+# --- Dynamic Closed-Loop Steering Scheduler ---
+st.sidebar.header("🔄 Dynamic Closed-Loop Steering")
+scheduler_choice = st.sidebar.selectbox(
+    "Alpha Scheduler",
+    options=["Fixed (Legacy)", "Linear", "Cosine", "Confidence-Based", "Entropy-Based"],
+    index=0,
+    help="Choose how alpha evolves during generation. 'Fixed' uses the slider value unchanged."
+)
+scheduler_key_map = {
+    "Fixed (Legacy)": "fixed",
+    "Linear": "linear",
+    "Cosine": "cosine",
+    "Confidence-Based": "confidence",
+    "Entropy-Based": "entropy",
+}
+selected_scheduler_key = scheduler_key_map[scheduler_choice]
+
+scheduler_params: dict = {}
+if selected_scheduler_key == "linear":
+    sched_col1, sched_col2 = st.sidebar.columns(2)
+    with sched_col1:
+        scheduler_params["alpha_start"] = st.number_input("α Start", value=3.0, step=0.5, key="lin_start")
+    with sched_col2:
+        scheduler_params["alpha_end"] = st.number_input("α End", value=0.5, step=0.5, key="lin_end")
+elif selected_scheduler_key == "cosine":
+    sched_col1, sched_col2 = st.sidebar.columns(2)
+    with sched_col1:
+        scheduler_params["alpha_max"] = st.number_input("α Max", value=3.0, step=0.5, key="cos_max")
+    with sched_col2:
+        scheduler_params["alpha_min"] = st.number_input("α Min", value=0.3, step=0.1, key="cos_min")
+elif selected_scheduler_key == "confidence":
+    scheduler_params["alpha_base"] = st.sidebar.number_input("α Base", value=2.0, step=0.5, key="conf_base")
+    scheduler_params["gamma"] = st.sidebar.slider("Gamma (sensitivity)", 0.1, 3.0, 1.0, 0.1, key="conf_gamma")
+elif selected_scheduler_key == "entropy":
+    sched_col1, sched_col2 = st.sidebar.columns(2)
+    with sched_col1:
+        scheduler_params["alpha_min"] = st.number_input("α Min", value=0.5, step=0.1, key="ent_min")
+    with sched_col2:
+        scheduler_params["alpha_max"] = st.number_input("α Max", value=3.0, step=0.5, key="ent_max")
+
 # Maintain computed concept vectors, layer scores & benchmarks in session state
 if "concept_vectors" not in st.session_state:
     st.session_state.concept_vectors = {}
@@ -598,6 +645,11 @@ with col_gen3:
     seed_val = st.number_input("Seed (for reproducibility)", min_value=0, max_value=99999, value=42, step=1)
 
 generate_clicked = st.button("🚀 Run Latent Steering Inference", type="primary")
+dynamic_gen_clicked = st.button(
+    "🔄 Run Dynamic Closed-Loop Steering" if selected_scheduler_key != "fixed" else "🔄 Dynamic Mode (select a scheduler)",
+    type="secondary",
+    disabled=(selected_scheduler_key == "fixed"),
+)
 
 # Sidebar warning if no layers are selected
 if len(target_layers) == 0:
@@ -719,13 +771,14 @@ if generate_clicked and len(target_layers) > 0:
 
 st.subheader("📊 Steering Analytics & Activation Trajectory")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Adaptive Layer Weights & Vector Magnitudes",
     "Latent Trajectory Projection",
     "Research Evaluation Metrics & Charts",
     "Automatic Layer Selection & Ranking",
     "Concept Extractor Benchmark & Comparison",
-    "Research Benchmark Suite & Leaderboards"
+    "Research Benchmark Suite & Leaderboards",
+    "Dynamic Closed-Loop Steering",
 ])
 
 with tab1:
@@ -1093,7 +1146,117 @@ with tab6:
     else:
         st.info("Expand **⚡ Configure & Trigger Automated Grid Sweep** above and click **🚀 Execute Grid Search Benchmark** to run experiments.")
 
+with tab7:
+    st.markdown("### 🔄 Dynamic Closed-Loop Alpha Steering")
+    st.markdown(
+        "Instead of a fixed steering coefficient, dynamic schedulers adapt α on a **per-token** basis during generation, "
+        "enabling fine-grained control over steering intensity throughout the decoding process."
+    )
 
+    # Dynamic generation handler
+    if dynamic_gen_clicked and len(target_layers) > 0:
+        if not prompt_input.strip():
+            st.error("Please enter a non-empty prompt.")
+        else:
+            current_vectors = {}
+            for layer in target_layers:
+                if layer in st.session_state.concept_vectors:
+                    current_vectors[layer] = st.session_state.concept_vectors[layer]
+                else:
+                    current_vectors[layer] = torch.zeros(4096 if model_name.startswith("Mock-Model") else model.config.hidden_size)
 
+            with st.spinner(f"Running dynamic generation with {scheduler_choice} scheduler..."):
+                try:
+                    generator = SteeredGenerator(model, tokenizer, config.device)
+                    formatted_prompt = prompt_input
+                    if not model_name.startswith("Mock-Model") and hasattr(tokenizer, "apply_chat_template"):
+                        try:
+                            messages = [{"role": "user", "content": prompt_input}]
+                            formatted_prompt = tokenizer.apply_chat_template(
+                                messages, tokenize=False, add_generation_prompt=True
+                            )
+                        except Exception:
+                            pass
 
+                    scheduler = build_scheduler(selected_scheduler_key, **scheduler_params)
 
+                    if model_name.startswith("Mock-Model"):
+                        # Simulate dynamic generation for mock model
+                        import math as _math
+                        baseline_text = tokenizer.decode(torch.tensor([0]), skip_special_tokens=True)
+                        generator.register_steering_hooks(current_vectors, alpha, strategy=strategy_key)
+                        steered_text = tokenizer.decode(torch.tensor([0]), skip_special_tokens=True)
+                        generator.remove_steering_hooks()
+
+                        # Simulate alpha trajectory
+                        sim_traj = AlphaTrajectory(scheduler_name=scheduler.name)
+                        for step in range(max_tokens):
+                            a_val = scheduler.step(step, max_tokens)
+                            sim_traj.record(a_val)
+                        trajectory = sim_traj
+                    else:
+                        baseline_text, steered_text, trajectory = generator.generate_comparative_dynamic(
+                            prompt=formatted_prompt,
+                            vectors=current_vectors,
+                            scheduler=scheduler,
+                            strategy=strategy_key,
+                            max_new_tokens=max_tokens,
+                            do_sample=do_sample,
+                            seed=int(seed_val),
+                        )
+
+                    st.session_state.last_trajectory = trajectory
+                    st.session_state.last_dynamic_baseline = baseline_text
+                    st.session_state.last_dynamic_steered = steered_text
+
+                    # Display generation results
+                    dcol_l, dcol_r = st.columns(2)
+                    with dcol_l:
+                        st.subheader("⚪ Baseline Output")
+                        st.write(baseline_text)
+                    with dcol_r:
+                        st.subheader(f"🔮 Dynamic Steered ({scheduler_choice})")
+                        st.write(steered_text)
+
+                    # Trajectory summary metrics
+                    traj_dict = trajectory.to_dict()
+                    mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+                    with mcol1:
+                        st.metric("α Mean", f"{traj_dict['alpha_mean']:.4f}")
+                    with mcol2:
+                        st.metric("α Min", f"{traj_dict['alpha_min']:.4f}")
+                    with mcol3:
+                        st.metric("α Max", f"{traj_dict['alpha_max']:.4f}")
+                    with mcol4:
+                        st.metric("α Std", f"{traj_dict['alpha_std']:.4f}")
+
+                except Exception as e:
+                    st.error(f"Dynamic generation failed: {e}")
+
+    # Render persisted trajectory plots
+    if "last_trajectory" in st.session_state and st.session_state.last_trajectory:
+        traj: AlphaTrajectory = st.session_state.last_trajectory
+
+        pcol1, pcol2 = st.columns(2)
+        with pcol1:
+            st.plotly_chart(plot_alpha_trajectory(traj), use_container_width=True)
+        with pcol2:
+            st.plotly_chart(plot_token_steering_strength(traj), use_container_width=True)
+
+        st.markdown("#### Alpha Trajectory Data")
+        st.json(traj.to_dict())
+
+        # Download trajectory
+        import json as _json
+        st.download_button(
+            label="📥 Download Alpha Trajectory (JSON)",
+            data=_json.dumps(traj.to_dict(), indent=2),
+            file_name=f"alpha_trajectory_{traj.scheduler_name}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+    else:
+        st.info(
+            "Select a dynamic scheduler (Linear, Cosine, Confidence, Entropy) in the sidebar, "
+            "then click **🔄 Run Dynamic Closed-Loop Steering** to generate with adaptive alpha."
+        )
