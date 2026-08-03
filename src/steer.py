@@ -13,13 +13,13 @@ injection into a causal LLM:
 4. Provides ``generate_comparative`` for side-by-side baseline vs. steered output.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.utils import get_logger, get_transformer_layer, set_seed
+from src.utils import compute_layer_weights, get_logger, get_transformer_layer, set_seed
 
 logger = get_logger(__name__)
 
@@ -57,12 +57,13 @@ class SteeredGenerator:
     def register_steering_hooks(
         self,
         vectors: Dict[int, torch.Tensor],
-        alpha: float,
+        alpha: Union[float, Dict[int, float]],
+        strategy: str = "uniform",
     ) -> None:
         """
-        Attach output hooks that additively inject concept vectors.
+        Attach output hooks that inject concept vectors with layer-specific steering coefficients.
 
-        The hook applies:  ``h_steered = h_original + alpha * v_concept``
+        The hook applies: ``h_steered = h_original + alpha_i * v_concept_i``
 
         Existing hooks are removed before new ones are registered to avoid
         accidental stacking.
@@ -71,13 +72,28 @@ class SteeredGenerator:
         ----------
         vectors : Dict[int, torch.Tensor]
             ``{layer_idx: concept_vector}`` mapping.
-        alpha : float
-            Steering coefficient.  ``alpha > 0`` reinforces the positive
-            concept; ``alpha < 0`` suppresses or reverses it.
+        alpha : float or Dict[int, float]
+            Steering coefficient(s). If a float/int scalar is provided, it is converted
+            into a layer-specific weight mapping based on ``strategy``.
+            If a dictionary mapping ``{layer_idx: alpha_i}`` is provided, it is used directly.
+        strategy : str, default="uniform"
+            Adaptive weighting strategy ("uniform", "linear_decay", "cosine_decay").
+            Ignored if ``alpha`` is a dictionary.
         """
         self.remove_steering_hooks()
 
-        def _make_hook(concept_vector: torch.Tensor):
+        if isinstance(alpha, (int, float)):
+            alpha_dict = compute_layer_weights(
+                list(vectors.keys()), base_alpha=float(alpha), strategy=strategy
+            )
+        elif isinstance(alpha, dict):
+            alpha_dict = alpha
+        else:
+            raise TypeError(
+                f"alpha must be a float, int, or Dict[int, float], got {type(alpha).__name__}"
+            )
+
+        def _make_hook(concept_vector: torch.Tensor, alpha_i: float):
             def _steering_hook(
                 module: nn.Module,
                 input_args: Tuple,
@@ -87,7 +103,7 @@ class SteeredGenerator:
                 vec = concept_vector.to(
                     device=hidden.device, dtype=hidden.dtype
                 )
-                steered = hidden + alpha * vec
+                steered = hidden + alpha_i * vec
                 if isinstance(output, tuple):
                     return (steered,) + output[1:]
                 return steered
@@ -95,12 +111,13 @@ class SteeredGenerator:
             return _steering_hook
 
         for layer_idx, vec in vectors.items():
+            alpha_i = alpha_dict.get(layer_idx, 1.0)
             module = get_transformer_layer(self.model, layer_idx)
-            hook = module.register_forward_hook(_make_hook(vec))
+            hook = module.register_forward_hook(_make_hook(vec, alpha_i))
             self.active_hooks.append(hook)
 
         logger.debug(
-            "Registered %d steering hooks | alpha=%.3f", len(self.active_hooks), alpha
+            "Registered %d steering hooks | alpha_dict=%s", len(self.active_hooks), alpha_dict
         )
 
     def remove_steering_hooks(self) -> None:
@@ -197,7 +214,8 @@ class SteeredGenerator:
         self,
         prompt: str,
         vectors: Dict[int, torch.Tensor],
-        alpha: float,
+        alpha: Union[float, Dict[int, float]],
+        strategy: str = "uniform",
         max_new_tokens: int = 128,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -217,8 +235,10 @@ class SteeredGenerator:
             Input text.
         vectors : Dict[int, torch.Tensor]
             Concept vectors keyed by layer index.
-        alpha : float
-            Steering intensity coefficient.
+        alpha : float or Dict[int, float]
+            Steering intensity coefficient(s).
+        strategy : str, default="uniform"
+            Weighting strategy ("uniform", "linear_decay", "cosine_decay").
         max_new_tokens : int, default=128
         temperature : float, default=0.7
         top_p : float, default=0.9
@@ -250,10 +270,11 @@ class SteeredGenerator:
 
         # Steered
         try:
-            self.register_steering_hooks(vectors, alpha)
+            self.register_steering_hooks(vectors, alpha, strategy=strategy)
             logger.info(
-                "Generating steered response | alpha=%.3f | layers=%s",
+                "Generating steered response | alpha=%s | strategy=%s | layers=%s",
                 alpha,
+                strategy,
                 list(vectors.keys()),
             )
             steered_text = self.generate(prompt, **gen_kwargs)
@@ -261,3 +282,4 @@ class SteeredGenerator:
             self.remove_steering_hooks()
 
         return baseline_text, steered_text
+

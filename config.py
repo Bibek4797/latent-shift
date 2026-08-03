@@ -33,7 +33,9 @@ class SteeringConfig:
     dtype_str: str = "float16"
     default_layers: List[int] = field(default_factory=lambda: [12, 13, 14, 15, 16])
     default_alpha: float = 2.0
+    default_strategy: str = "uniform"
     data_dir: str = "data/concept_vectors"
+
 
     @property
     def dtype(self) -> torch.dtype:

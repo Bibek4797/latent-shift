@@ -145,6 +145,13 @@ def parse_args() -> argparse.Namespace:
         help="Layer indices to apply steering on.",
     )
     parser.add_argument(
+        "--strategy",
+        type=str,
+        default="uniform",
+        choices=["uniform", "linear_decay", "cosine_decay"],
+        help="Adaptive multi-layer weighting strategy.",
+    )
+    parser.add_argument(
         "--prompt",
         type=str,
         default="Tell me about the importance of safety.",
@@ -205,7 +212,13 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info("LatentShift Experiment")
     logger.info("=" * 60)
-    logger.info("Concept : %s | Method : %s | Alpha : %.2f", args.concept, args.method, args.alpha)
+    logger.info(
+        "Concept : %s | Method : %s | Alpha : %.2f | Strategy : %s",
+        args.concept,
+        args.method,
+        args.alpha,
+        args.strategy,
+    )
     logger.info("Layers  : %s", args.layers)
     logger.info("Seed    : %d | Normalize : %s", args.seed, args.normalize)
 
@@ -214,6 +227,7 @@ def main() -> None:
         model_name=args.model,
         default_layers=args.layers,
         default_alpha=args.alpha,
+        default_strategy=args.strategy,
     )
     model, tokenizer = load_model_and_tokenizer(
         config,
@@ -252,6 +266,7 @@ def main() -> None:
             "method": args.method,
             "layers": args.layers,
             "alpha": args.alpha,
+            "strategy": args.strategy,
             "normalize": args.normalize,
             "seed": args.seed,
         },
@@ -265,24 +280,27 @@ def main() -> None:
         prompt=args.prompt,
         vectors=concept_vectors,
         alpha=args.alpha,
+        strategy=args.strategy,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
         seed=args.seed,
     )
 
+
     # ---- Evaluation --------------------------------------------------------
-    logger.info("Computing evaluation metrics...")
-    # Use the middle-layer vector as reference for the report
+    logger.info("Computing full research evaluation report...")
     mid_layer = args.layers[len(args.layers) // 2]
-    report = SteeringEvaluator.compute_steering_report(
+    eval_report = SteeringEvaluator.evaluate_full(
         model=model,
         tokenizer=tokenizer,
+        prompt=args.prompt,
         baseline_text=baseline,
         steered_text=steered,
         concept_vector=concept_vectors[mid_layer],
         device=config.device,
     )
+    report_dict = eval_report.to_dict()
 
     # ---- Display Results ---------------------------------------------------
     print("\n" + "=" * 60)
@@ -290,10 +308,12 @@ def main() -> None:
     print("=" * 60)
     print(f"\nPrompt:\n  {args.prompt}\n")
     print(f"[BASELINE]\n{baseline}\n")
-    print(f"[STEERED  | concept={args.concept} | alpha={args.alpha}]\n{steered}\n")
+    print(f"[STEERED  | concept={args.concept} | alpha={args.alpha} | strategy={args.strategy}]\n{steered}\n")
     print("Evaluation Metrics:")
-    for k, v in report.items():
-        print(f"  {k:<20}: {v}")
+    for k, v in report_dict.items():
+        if isinstance(v, dict):
+            continue  # Print scalar metrics in summary
+        print(f"  {k:<26}: {v}")
     print("=" * 60)
 
     # ---- Save JSON Report --------------------------------------------------
@@ -309,6 +329,7 @@ def main() -> None:
             "concept": args.concept,
             "method": args.method,
             "alpha": args.alpha,
+            "strategy": args.strategy,
             "layers": args.layers,
             "seed": args.seed,
             "normalize": args.normalize,
@@ -317,13 +338,14 @@ def main() -> None:
         "prompt": args.prompt,
         "baseline": baseline,
         "steered": steered,
-        "metrics": report,
+        "metrics": report_dict,
     }
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     logger.info("Results saved to: %s", output_path)
     logger.info("Experiment complete.")
+
 
 
 if __name__ == "__main__":

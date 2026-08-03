@@ -32,9 +32,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from src.utils import get_logger, get_transformer_layer, normalize_vector, set_seed
+from src.utils import compute_layer_weights, get_logger, get_transformer_layer, normalize_vector, set_seed
 from src.compute import ConceptVectorEngine
 from src.evaluator import SteeringEvaluator
+
 
 logger = get_logger(__name__)
 
@@ -275,6 +276,106 @@ class TestSteeringEvaluator(unittest.TestCase):
         result = SteeringEvaluator.compute_perplexity(model, tokenizer, "   ")
         self.assertTrue(result != result)  # nan != nan
 
+    def test_kl_divergence_identical(self):
+        logits = torch.randn(1, 10, 100)
+        kl = SteeringEvaluator.compute_kl_divergence(logits, logits)
+        self.assertAlmostEqual(kl, 0.0, places=4)
+
+    def test_kl_divergence_positive(self):
+        p_logits = torch.tensor([[[2.0, 1.0, 0.1]]])
+        q_logits = torch.tensor([[[0.1, 1.0, 2.0]]])
+        kl = SteeringEvaluator.compute_kl_divergence(p_logits, q_logits)
+        self.assertGreater(kl, 0.0)
+
+    def test_js_divergence_symmetry(self):
+        p_logits = torch.randn(1, 5, 50)
+        q_logits = torch.randn(1, 5, 50)
+        js1 = SteeringEvaluator.compute_js_divergence(p_logits, q_logits)
+        js2 = SteeringEvaluator.compute_js_divergence(q_logits, p_logits)
+        self.assertAlmostEqual(js1, js2, places=4)
+        self.assertGreaterEqual(js1, 0.0)
+
+    def test_entropy_non_negative(self):
+        logits = torch.randn(1, 5, 50)
+        ent = SteeringEvaluator.compute_entropy(logits)
+        self.assertGreater(ent, 0.0)
+
+    def test_hidden_state_norm_difference(self):
+        hb = torch.tensor([3.0, 4.0])  # norm = 5.0
+        hs = torch.tensor([6.0, 8.0])  # norm = 10.0
+        diff = SteeringEvaluator.compute_hidden_state_norm_difference(hb, hs)
+        self.assertAlmostEqual(diff, 5.0, places=4)
+
+    def test_layerwise_cosine_similarity(self):
+        hb_dict = {0: torch.tensor([1.0, 0.0]), 1: torch.tensor([0.0, 1.0])}
+        hs_dict = {0: torch.tensor([1.0, 0.0]), 1: torch.tensor([0.0, -1.0])}
+        cos_map = SteeringEvaluator.compute_layerwise_cosine_similarity(hb_dict, hs_dict)
+        self.assertAlmostEqual(cos_map[0], 1.0, places=4)
+        self.assertAlmostEqual(cos_map[1], -1.0, places=4)
+
+    def test_average_shift_magnitude(self):
+        hb_dict = {0: torch.zeros(4), 1: torch.zeros(4)}
+        hs_dict = {0: torch.ones(4) * 3.0, 1: torch.ones(4) * 4.0}  # norm: 6.0 and 8.0
+        avg_shift = SteeringEvaluator.compute_average_shift_magnitude(hb_dict, hs_dict)
+        self.assertAlmostEqual(avg_shift, 7.0, places=4)
+
+    def test_steering_strength_score(self):
+        hb_dict = {0: torch.tensor([3.0, 4.0])}  # norm = 5.0
+        hs_dict = {0: torch.tensor([3.0, 9.0])}  # shift = [0, 5], shift norm = 5.0
+        score = SteeringEvaluator.compute_steering_strength_score(hb_dict, hs_dict)
+        self.assertAlmostEqual(score, 1.0, places=4)
+
+    def test_evaluate_full_and_serialization(self):
+        model = _LlamaStyleModel()
+        tokenizer = _DummyTokenizer()
+        hb_dict = {0: torch.randn(16), 1: torch.randn(16)}
+        hs_dict = {0: torch.randn(16), 1: torch.randn(16)}
+
+        rep = SteeringEvaluator.evaluate_full(
+            model=model,
+            tokenizer=tokenizer,
+            prompt="Test prompt",
+            baseline_text="Hello baseline",
+            steered_text="Hello steered",
+            h_base_dict=hb_dict,
+            h_steered_dict=hs_dict,
+        )
+        self.assertIsNotNone(rep.kl_divergence)
+        self.assertIsNotNone(rep.js_divergence)
+        json_str = rep.to_json()
+        self.assertIn("kl_divergence", json_str)
+        self.assertIn("js_divergence", json_str)
+
+
+
+class TestComputeLayerWeights(unittest.TestCase):
+    """Tests for compute_layer_weights() weighting strategies."""
+
+    def test_uniform_strategy(self):
+        weights = compute_layer_weights([10, 11, 12], base_alpha=2.0, strategy="uniform")
+        self.assertEqual(weights, {10: 2.0, 11: 2.0, 12: 2.0})
+
+    def test_linear_decay_strategy(self):
+        weights = compute_layer_weights([10, 11, 12], base_alpha=2.0, strategy="linear_decay")
+        self.assertAlmostEqual(weights[10], 2.0)
+        self.assertAlmostEqual(weights[11], 1.0)
+        self.assertAlmostEqual(weights[12], 0.0)
+
+    def test_cosine_decay_strategy(self):
+        weights = compute_layer_weights([10, 11, 12], base_alpha=2.0, strategy="cosine_decay")
+        self.assertAlmostEqual(weights[10], 2.0)
+        self.assertAlmostEqual(weights[11], 1.0)
+        self.assertAlmostEqual(weights[12], 0.0)
+
+    def test_single_layer(self):
+        for strat in ["uniform", "linear_decay", "cosine_decay"]:
+            weights = compute_layer_weights([5], base_alpha=3.0, strategy=strat)
+            self.assertEqual(weights, {5: 3.0})
+
+    def test_invalid_strategy_raises(self):
+        with self.assertRaises(ValueError):
+            compute_layer_weights([1, 2], base_alpha=1.0, strategy="unknown_strat")
+
 
 class TestSteeredGeneratorHooks(unittest.TestCase):
     """Test hook lifecycle without triggering real generation."""
@@ -292,6 +393,19 @@ class TestSteeredGeneratorHooks(unittest.TestCase):
         vectors = {0: torch.randn(16), 1: torch.randn(16)}
         self.generator.register_steering_hooks(vectors, alpha=1.0)
         self.assertEqual(len(self.generator.active_hooks), 2)
+        self.generator.remove_steering_hooks()
+
+    def test_register_per_layer_alpha_dict(self):
+        vectors = {0: torch.randn(16), 1: torch.randn(16)}
+        alpha_dict = {0: 2.5, 1: 0.5}
+        self.generator.register_steering_hooks(vectors, alpha=alpha_dict)
+        self.assertEqual(len(self.generator.active_hooks), 2)
+        self.generator.remove_steering_hooks()
+
+    def test_register_with_decay_strategy(self):
+        vectors = {0: torch.randn(16), 1: torch.randn(16), 2: torch.randn(16)}
+        self.generator.register_steering_hooks(vectors, alpha=2.0, strategy="cosine_decay")
+        self.assertEqual(len(self.generator.active_hooks), 3)
         self.generator.remove_steering_hooks()
 
     def test_remove_clears_hooks(self):
@@ -315,3 +429,4 @@ class TestSteeredGeneratorHooks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

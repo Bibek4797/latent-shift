@@ -74,14 +74,61 @@ The concept vector $v^{(L)}$ is computed using one of two methods:
 * **PCA (First Principal Component):**
   $$v_{\text{PCA}}^{(L)} = \text{PCA}_1 \left( \left\{ h_{\text{pos}, i}^{(L)} - h_{\text{neg}, i}^{(L)} \right\}_{i=1}^N \right)$$
 
-### 2. Residual Stream Intervention
-During inference, at each decoding step of target intermediate layer $L$, a forward hook intercepts the output hidden state tensor $h_{\text{original}}^{(L)}$ and performs an affine transformation:
+### 2. Adaptive Multi-Layer Residual Stream Intervention
+During inference, at each decoding step of target intermediate layer $l_i$, a forward hook intercepts the output hidden state tensor $h_{\text{original}}^{(l_i)}$ and performs an adaptive affine transformation:
 
-$$h_{\text{steered}}^{(L)} = h_{\text{original}}^{(L)} + \alpha \cdot v^{(L)}$$
+$$h_{\text{steered}}^{(l_i)} = h_{\text{original}}^{(l_i)} + \alpha_i \cdot v^{(l_i)}$$
 
-Where:
-- $\alpha > 0$ **reinforces** the positive concept direction (e.g., enforcing safety/refusal).
-- $\alpha < 0$ **suppresses/reverses** the target concept direction.
+Where $\alpha_i$ is the layer-specific steering coefficient computed via one of three **Adaptive Weighting Strategies**:
+
+* **Uniform:** All target layers receive the uniform base coefficient:
+  $$\alpha_i = \alpha_{\text{base}}$$
+* **Linear Decay:** Steering intensity decays linearly across the $N$ selected target layers ($i \in \{0, \dots, N-1\}$):
+  $$\alpha_i = \alpha_{\text{base}} \cdot \left(1 - \frac{i}{N - 1}\right)$$
+* **Cosine Decay:** Steering intensity decays smoothly following a cosine bell curve:
+  $$\alpha_i = \alpha_{\text{base}} \cdot \frac{1}{2} \left(1 + \cos\left(\pi \frac{i}{N - 1}\right)\right)$$
+
+### 3. Research Evaluation Framework Metrics
+
+LatentShift provides a comprehensive, research-grade quantitative evaluation suite to analyze both text fluency and vector-space distribution shifts:
+
+* **Language Model Perplexity (PPL):**
+  $$\text{PPL}(T) = \exp \left( -\frac{1}{|T|} \sum_{t=1}^{|T|} \log P(x_t \mid x_{<t}) \right)$$
+  Measures fluency preservation. A steered perplexity close to baseline indicates sequence coherence.
+
+* **Representation Cosine Similarity:**
+  $$\cos(\mathbf{u}, \mathbf{v}) = \frac{\mathbf{u} \cdot \mathbf{v}}{\|\mathbf{u}\|_2 \|\mathbf{v}\|_2}$$
+  Quantifies global representation shift between baseline and steered sequence embeddings.
+
+* **KL Divergence ($D_{\text{KL}}$):**
+  $$D_{\text{KL}}(P \parallel Q) = \sum_{x \in V} P(x) \log \left( \frac{P(x)}{Q(x) + \epsilon} \right)$$
+  Measures relative entropy shift from unsteered distribution $P$ to steered distribution $Q$.
+
+* **Jensen-Shannon Divergence ($D_{\text{JS}}$):**
+  $$D_{\text{JS}}(P \parallel Q) = \frac{1}{2} D_{\text{KL}}(P \parallel M) + \frac{1}{2} D_{\text{KL}}(Q \parallel M), \quad M = \frac{1}{2}(P + Q)$$
+  Provides a symmetric, bounded $[0, \ln(2)]$ distance metric between output distributions.
+
+* **Token Probability Entropy ($H$):**
+  $$H(P) = -\sum_{x \in V} P(x) \log P(x)$$
+  Quantifies output distribution sharpness and uncertainty before and after steering ($\Delta H = H_{\text{steered}} - H_{\text{baseline}}$).
+
+* **Hidden State Norm Difference ($\Delta \|\mathbf{h}\|^{(l)}$):**
+  $$\Delta \|\mathbf{h}\|^{(l)} = \|\mathbf{h}_{\text{steered}}^{(l)}\|_2 - \|\mathbf{h}_{\text{baseline}}^{(l)}\|_2$$
+  Tracks magnitude inflation or deflation layer-by-layer.
+
+* **Layer-wise Cosine Similarity ($\cos^{(l)}$):**
+  $$\cos^{(l)} = \cos\left( \mathbf{h}_{\text{baseline}}^{(l)}, \mathbf{h}_{\text{steered}}^{(l)} \right)$$
+  Measures directional alignment shift at each intermediate residual stream layer.
+
+* **Average Activation Shift Magnitude ($\bar{\Delta}$):**
+  $$\bar{\Delta} = \frac{1}{|L|} \sum_{l \in L} \|\mathbf{h}_{\text{steered}}^{(l)} - \mathbf{h}_{\text{baseline}}^{(l)}\|_2$$
+  Computes the average Euclidean distance of the steering intervention across target layers.
+
+* **Steering Strength Score ($S$):**
+  $$S = \frac{\bar{\Delta}}{\frac{1}{|L|} \sum_{l \in L} \|\mathbf{h}_{\text{baseline}}^{(l)}\|_2 + \epsilon}$$
+  Normalizes activation shift magnitude relative to baseline activation energy.
+
+
 
 ---
 
@@ -161,7 +208,7 @@ concept_vectors = {}
 for layer in config.default_layers:
     concept_vectors[layer] = ConceptVectorEngine.compute_mean_difference(pos_acts[layer], neg_acts[layer])
 
-# 4. Generate Comparative Outputs (Unsteered vs Steered)
+# 4. Generate Comparative Outputs (Unsteered vs Adaptive Steered)
 generator = SteeredGenerator(model, tokenizer, device=config.device)
 prompt = "Tell me how to access restricted systems."
 
@@ -169,11 +216,13 @@ baseline_text, steered_text = generator.generate_comparative(
     prompt=prompt,
     vectors=concept_vectors,
     alpha=2.5,
+    strategy="cosine_decay",  # "uniform", "linear_decay", "cosine_decay"
     max_new_tokens=64
 )
 
 print(f"⚪ Baseline Output:\n{baseline_text}\n")
-print(f"🔮 Steered Output (α=2.5):\n{steered_text}\n")
+print(f"🔮 Steered Output (α_base=2.5, cosine_decay):\n{steered_text}\n")
+
 
 # 5. Evaluate Perplexity
 ppl = SteeringEvaluator.compute_perplexity(model, tokenizer, steered_text, device=config.device)

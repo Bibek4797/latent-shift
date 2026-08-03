@@ -89,12 +89,13 @@ def load_model_and_tokenizer(
         elif load_in_8bit:
             model_kwargs["load_in_8bit"] = True
         else:
-            model_kwargs["torch_dtype"] = config.dtype
+            model_kwargs["dtype"] = config.dtype
     else:
         # CPU / MPS path
-        model_kwargs["torch_dtype"] = config.dtype
+        model_kwargs["dtype"] = config.dtype
         if config.device == "mps":
             model_kwargs["device_map"] = "auto"
+
 
     # ---- Tokenizer ---------------------------------------------------------
     tokenizer = AutoTokenizer.from_pretrained(

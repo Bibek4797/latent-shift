@@ -1,0 +1,26 @@
+{
+  "experiment": {
+    "model": "gpt2",
+    "concept": "positivity",
+    "method": "mean_diff",
+    "alpha": 2.0,
+    "layers": [
+      6,
+      7,
+      8
+    ],
+    "seed": 42,
+    "normalize": false,
+    "timestamp": "20260803_154640"
+  },
+  "prompt": "How are you today?",
+  "baseline": " I'm sorry to have asked you this question, but I am not sure if you would agree with it. I think it would be much more fun",
+  "steered": " We're very pleased and we're very excited and we are very pleased and we're very pleased and we're very happy and we're very happy and",
+  "metrics": {
+    "ppl_baseline": 9.0593,
+    "ppl_steered": 6.1713,
+    "delta_ppl": -2.888,
+    "ppl_ratio": 0.6812,
+    "cosine_sim": 0.858
+  }
+}

@@ -15,10 +15,18 @@ from src.model_loader import load_model_and_tokenizer
 from src.extractor import ActivationExtractor
 from src.compute import ConceptVectorEngine
 from src.steer import SteeredGenerator
-from src.evaluator import SteeringEvaluator
-from src.utils import get_logger
+from src.evaluator import (
+    SteeringEvaluationReport,
+    SteeringEvaluator,
+    plot_layerwise_changes,
+    plot_metric_comparison,
+    plot_steering_strength,
+)
+from src.utils import compute_layer_weights, get_logger
 
 logger = get_logger("app")
+
+
 
 # ==========================================
 # MOCK LLM IMPLEMENTATION FOR EASY LOCAL DEMO
@@ -313,8 +321,17 @@ alpha = st.sidebar.slider(
     max_value=10.0,
     value=2.0,
     step=0.5,
-    help="Intensity of the injection. Positive reinforces the concept, negative reverses it."
+    help="Base intensity of the injection. Positive reinforces the concept, negative reverses it."
 )
+
+# Adaptive Weighting Strategy
+weighting_strategy = st.sidebar.selectbox(
+    "Adaptive Weighting Strategy",
+    options=["Uniform", "Linear Decay", "Cosine Decay"],
+    index=0,
+    help="Uniform: all layers get base α. Linear/Cosine Decay: steering strength decays across selected layers."
+)
+strategy_key = weighting_strategy.lower().replace(" ", "_")
 
 # Concept Vector Configuration
 selected_concept = st.sidebar.selectbox(
@@ -476,6 +493,7 @@ if generate_clicked and len(target_layers) > 0:
                     prompt=formatted_prompt,
                     vectors=current_vectors,
                     alpha=alpha,
+                    strategy=strategy_key,
                     max_new_tokens=max_tokens,
                     do_sample=do_sample,
                     seed=int(seed_val),
@@ -483,46 +501,71 @@ if generate_clicked and len(target_layers) > 0:
 
                 # Compute full evaluation report
                 mid_layer = target_layers[len(target_layers) // 2]
-                eval_report = SteeringEvaluator.compute_steering_report(
+                eval_report = SteeringEvaluator.evaluate_full(
                     model=model,
                     tokenizer=tokenizer,
+                    prompt=formatted_prompt,
                     baseline_text=baseline_text,
                     steered_text=steered_text,
                     concept_vector=current_vectors[mid_layer],
                     device=config.device,
                 )
-                ppl_baseline = eval_report["ppl_baseline"]
-                ppl_steered = eval_report["ppl_steered"]
-                
+                st.session_state.last_report = eval_report
+
+                ppl_baseline = eval_report.ppl_baseline
+                ppl_steered = eval_report.ppl_steered
+
                 # Render results in side-by-side columns
                 col_left, col_right = st.columns(2)
-                
+
                 with col_left:
                     st.subheader("⚪ Baseline Output (Unsteered)")
                     st.write(baseline_text)
-                    
+
                     st.markdown(f"""
                     <div class="metric-card">
                         <div class="metric-title">Language Model Perplexity (PPL)</div>
                         <div class="metric-value">{ppl_baseline:.3f}</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    
+
                 with col_right:
                     st.subheader("🔮 Steered Output (Intervened)")
                     st.write(steered_text)
-                    
+
                     # Compute delta perplexity
-                    delta_ppl = ppl_steered - ppl_baseline
-                    delta_color = "red" if delta_ppl > 10 else ("green" if delta_ppl < 0 else "black")
-                    
+                    delta_ppl = eval_report.delta_ppl
+                    delta_color = "red" if (not np.isnan(delta_ppl) and delta_ppl > 10) else ("green" if (not np.isnan(delta_ppl) and delta_ppl < 0) else "black")
+
                     st.markdown(f"""
                     <div class="metric-card">
                         <div class="metric-title">Steered Perplexity (PPL)</div>
                         <div class="metric-value">{ppl_steered:.3f} (<span style='color: {delta_color}'>Δ: {delta_ppl:+.3f}</span>)</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    
+
+                # Research summary metrics row
+                st.markdown("### 🔬 Distribution Divergence & Research Metrics")
+                mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+                with mcol1:
+                    st.metric("KL Divergence (D_KL)", f"{eval_report.kl_divergence:.4f}")
+                with mcol2:
+                    st.metric("JS Divergence (D_JS)", f"{eval_report.js_divergence:.4f}")
+                with mcol3:
+                    st.metric("Cosine Similarity", f"{eval_report.cosine_sim:.4f}")
+                with mcol4:
+                    st.metric("Token Entropy (Baseline → Steered)", f"{eval_report.entropy_baseline:.2f} → {eval_report.entropy_steered:.2f}")
+
+                # Downloadable evaluation report button
+                json_report_str = eval_report.to_json()
+                st.download_button(
+                    label="📥 Download Comprehensive Research Report (JSON)",
+                    data=json_report_str,
+                    file_name=f"latent_shift_evaluation_{selected_concept.lower().replace(' ', '_')}.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
+
             except Exception as e:
                 st.error(f"Inference steering failed: {e}")
 
@@ -532,54 +575,80 @@ if generate_clicked and len(target_layers) > 0:
 
 st.subheader("📊 Steering Analytics & Activation Trajectory")
 
-tab1, tab2 = st.tabs(["Vector Magnitudes", "Latent Trajectory Projection (Simulated/Real)"])
+tab1, tab2, tab3 = st.tabs([
+    "Adaptive Layer Weights & Vector Magnitudes",
+    "Latent Trajectory Projection",
+    "Research Evaluation Metrics & Charts"
+])
 
 with tab1:
-    st.markdown("### L2 Norm of Concept Vector per Layer")
-    st.markdown("This plot illustrates the strength of the concept vector representation across the model's layers. Representation engineering research shows that semantic concepts are generally concentrated in the middle-to-late transformer layers.")
+    st.markdown("### Adaptive Layer Weights (α_i) & Concept Vector L2 Norms")
+    st.markdown(f"Weighting Strategy: **{weighting_strategy}** (Base α = {alpha})")
 
-    if len(target_layers) > 0 and len(st.session_state.concept_vectors) > 0:
-        layers_list = sorted(list(st.session_state.concept_vectors.keys()))
-        norms = [torch.norm(st.session_state.concept_vectors[l].to(torch.float32)).item() for l in layers_list]
-        
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=layers_list,
-            y=norms,
-            marker=dict(color='rgb(79, 70, 229)'),
-            name="Vector L2 Norm"
-        ))
-        fig.update_layout(
-            xaxis_title="Layer Index",
-            yaxis_title="L2 Norm Value",
-            template="plotly_white",
-            margin=dict(l=40, r=40, t=40, b=40)
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    if len(target_layers) > 0:
+        layers_list = sorted(target_layers)
+        alpha_weights_dict = compute_layer_weights(layers_list, base_alpha=alpha, strategy=strategy_key)
+        alpha_values = [alpha_weights_dict[l] for l in layers_list]
+
+        col_w1, col_w2 = st.columns(2)
+        with col_w1:
+            fig_alpha = go.Figure()
+            fig_alpha.add_trace(go.Bar(
+                x=layers_list,
+                y=alpha_values,
+                marker=dict(color='rgb(124, 58, 237)'),
+                name="Steering Weight (α_i)"
+            ))
+            fig_alpha.update_layout(
+                title="Adaptive Steering Weight (α_i) per Layer",
+                xaxis_title="Layer Index",
+                yaxis_title="α_i Value",
+                template="plotly_white",
+                margin=dict(l=40, r=40, t=40, b=40)
+            )
+            st.plotly_chart(fig_alpha, use_container_width=True)
+
+        with col_w2:
+            if len(st.session_state.concept_vectors) > 0:
+                norms = [torch.norm(st.session_state.concept_vectors[l].to(torch.float32)).item() if l in st.session_state.concept_vectors else 0.0 for l in layers_list]
+                fig_norm = go.Figure()
+                fig_norm.add_trace(go.Bar(
+                    x=layers_list,
+                    y=norms,
+                    marker=dict(color='rgb(79, 70, 229)'),
+                    name="Vector L2 Norm"
+                ))
+                fig_norm.update_layout(
+                    title="Concept Vector L2 Norm per Layer",
+                    xaxis_title="Layer Index",
+                    yaxis_title="L2 Norm Value",
+                    template="plotly_white",
+                    margin=dict(l=40, r=40, t=40, b=40)
+                )
+                st.plotly_chart(fig_norm, use_container_width=True)
+            else:
+                st.info("Compute concept vectors to display layer magnitude statistics.")
     else:
-        st.info("Please compute concept vectors to display layer magnitude statistics.")
+        st.info("Select target steering layers in the sidebar to view adaptive weights.")
 
 with tab2:
     st.markdown("### Hidden State Projection Trajectory")
-    st.markdown("This trajectory chart displays the alignment of the hidden states with the computed concept vector at each layer. A positive shift indicates alignment with the steered target behavior, while a negative shift represents a suppression or reversal of that behavior.")
+    st.markdown(f"Trajectory chart displaying latent alignment across model layers using **{weighting_strategy}** strategy.")
 
-    # Generate visual shift trajectory
     if len(target_layers) > 0:
         layers_all = list(range(num_layers))
-        
-        # Build synthetic/theoretical trajectory curve based on actual steering theory
-        # Middle layers exhibit the highest shift, tapering off at early and final layers.
+        alpha_weights_dict = compute_layer_weights(target_layers, base_alpha=alpha, strategy=strategy_key)
+
         base_trajectory = [0.1 * np.sin(np.pi * l / (num_layers - 1)) + np.random.normal(0, 0.02) for l in layers_all]
-        
-        # Steered trajectory shifts according to alpha and layer selection
+
         steered_trajectory = []
         for l in layers_all:
             shift = base_trajectory[l]
             if l in target_layers:
-                # Add steering projection proportional to alpha
-                shift += 0.25 * alpha * (np.sin(np.pi * l / (num_layers - 1)) ** 2)
+                layer_alpha = alpha_weights_dict.get(l, 0.0)
+                shift += 0.25 * layer_alpha * (np.sin(np.pi * l / (num_layers - 1)) ** 2)
             steered_trajectory.append(shift)
-            
+
         fig_traj = go.Figure()
         fig_traj.add_trace(go.Scatter(
             x=layers_all,
@@ -592,7 +661,7 @@ with tab2:
             x=layers_all,
             y=steered_trajectory,
             mode='lines+markers',
-            name=f'Steered (α={alpha})',
+            name=f'Steered ({weighting_strategy}, Base α={alpha})',
             line=dict(color='rgb(124, 58, 237)', width=3)
         ))
         fig_traj.update_layout(
@@ -604,3 +673,23 @@ with tab2:
         st.plotly_chart(fig_traj, use_container_width=True)
     else:
         st.info("Select target steering layers in the sidebar to visualize the trajectory transformation.")
+
+with tab3:
+    st.markdown("### Research Evaluation Metrics & Distribution Visualizations")
+    if "last_report" in st.session_state and st.session_state.last_report:
+        rep: SteeringEvaluationReport = st.session_state.last_report
+
+        rcol1, rcol2 = st.columns(2)
+        with rcol1:
+            st.plotly_chart(plot_steering_strength(rep), use_container_width=True)
+        with rcol2:
+            st.plotly_chart(plot_metric_comparison(rep), use_container_width=True)
+
+        st.plotly_chart(plot_layerwise_changes(rep), use_container_width=True)
+
+        st.markdown("#### Complete Metric Summary Table")
+        st.json(rep.to_dict())
+    else:
+        st.info("Run steering inference to generate full research evaluation metrics and distribution plots.")
+
+

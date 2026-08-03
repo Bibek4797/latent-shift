@@ -9,11 +9,14 @@ Includes:
 - get_logger(): Standard library logger factory with consistent formatting.
 - set_seed(): Reproducibility seed setter for Python, NumPy, and PyTorch.
 - normalize_vector(): Optional L2 normalization for concept vectors.
+- compute_layer_weights(): Calculates per-layer steering coefficients (alpha_i)
+  based on adaptive weighting strategies ("uniform", "linear_decay", "cosine_decay").
 """
 
 import logging
+import math
 import random
-from typing import Optional
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -143,3 +146,74 @@ def normalize_vector(
     """
     norm = torch.norm(vec.to(torch.float32)) + eps
     return (vec.to(torch.float32) / norm).to(vec.dtype)
+
+
+def compute_layer_weights(
+    layers: List[int],
+    base_alpha: float = 2.0,
+    strategy: str = "uniform",
+) -> Dict[int, float]:
+    """
+    Compute per-layer steering coefficients (alpha_i) for adaptive multi-layer steering.
+
+    Supported strategies:
+    - "uniform": All target layers receive base_alpha (alpha_i = base_alpha).
+    - "linear_decay": Steering strength decays linearly across target layers from base_alpha to 0.0.
+    - "cosine_decay": Steering strength follows a smooth cosine curve from base_alpha to 0.0.
+
+    Parameters
+    ----------
+    layers : List[int]
+        List of target layer indices.
+    base_alpha : float, default=2.0
+        Base steering intensity coefficient.
+    strategy : str, default="uniform"
+        Weighting strategy ("uniform", "linear_decay", "cosine_decay").
+
+    Returns
+    -------
+    Dict[int, float]
+        Mapping from layer_idx to its layer-specific steering coefficient (alpha_i).
+
+    Raises
+    ------
+    ValueError
+        If an unrecognized weighting strategy is specified.
+    """
+    if not layers:
+        return {}
+
+    sorted_layers = sorted(layers)
+    num_layers = len(sorted_layers)
+    strat = strategy.lower().strip()
+
+    weights: Dict[int, float] = {}
+
+    if strat == "uniform":
+        for layer in sorted_layers:
+            weights[layer] = float(base_alpha)
+    elif strat in ("linear_decay", "linear"):
+        if num_layers == 1:
+            weights[sorted_layers[0]] = float(base_alpha)
+        else:
+            for i, layer in enumerate(sorted_layers):
+                t = i / (num_layers - 1)
+                w = 1.0 - t
+                weights[layer] = float(base_alpha) * w
+    elif strat in ("cosine_decay", "cosine"):
+        if num_layers == 1:
+            weights[sorted_layers[0]] = float(base_alpha)
+        else:
+            for i, layer in enumerate(sorted_layers):
+                t = i / (num_layers - 1)
+                w = 0.5 * (1.0 + math.cos(math.pi * t))
+                weights[layer] = float(base_alpha) * w
+    else:
+        raise ValueError(
+            f"Unknown weighting strategy '{strategy}'. "
+            "Supported strategies: 'uniform', 'linear_decay', 'cosine_decay'."
+        )
+
+    return weights
+
+
