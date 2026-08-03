@@ -122,7 +122,7 @@ class SteeringEvaluator:
         inputs = {k: v.to(device) for k, v in inputs.items()}
         inputs["labels"] = inputs["input_ids"].clone()
 
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = model(**inputs)
             loss = outputs.loss
 
@@ -384,7 +384,7 @@ class SteeringEvaluator:
         inputs_b = {k: v.to(device) for k, v in enc_b.items()}
         inputs_s = {k: v.to(device) for k, v in enc_s.items()}
 
-        with torch.no_grad():
+        with torch.inference_mode():
             out_b = model(**inputs_b)
             out_s = model(**inputs_s)
             logits_b = out_b.logits
@@ -404,7 +404,7 @@ class SteeringEvaluator:
         def _text_embedding(text: str) -> torch.Tensor:
             enc = tokenizer(text or " ", return_tensors="pt")
             ids = enc["input_ids"].to(device)
-            with torch.no_grad():
+            with torch.inference_mode():
                 if hasattr(model, "get_input_embeddings"):
                     emb_weight = model.get_input_embeddings().weight
                     embs = emb_weight[ids[0]].mean(dim=0).float().cpu()

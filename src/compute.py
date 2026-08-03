@@ -34,7 +34,9 @@ class ConceptVectorEngine:
     Compute, persist, and load steering concept vectors.
 
     All methods are static so the class acts as a stateless namespace.
+    Includes an in-memory cache to avoid redundant disk I/O.
     """
+    _vector_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
     # ------------------------------------------------------------------
     # Computation
@@ -154,8 +156,12 @@ class ConceptVectorEngine:
         checkpoint = {"vectors": cpu_vectors, "metadata": meta}
         torch.save(checkpoint, file_path)
 
-        logger.info("Vectors saved | path=%s | layers=%s", file_path, list(cpu_vectors.keys()))
-        return file_path
+        # Cache in memory
+        abs_path = os.path.abspath(file_path)
+        ConceptVectorEngine._vector_cache[abs_path] = cpu_vectors
+
+        logger.info("Vectors saved | path=%s | layers=%s", abs_path, list(cpu_vectors.keys()))
+        return abs_path
 
     @staticmethod
     def load_vectors(file_path: str) -> Dict[int, torch.Tensor]:
@@ -181,6 +187,11 @@ class ConceptVectorEngine:
         FileNotFoundError
             If ``file_path`` does not exist.
         """
+        abs_path = os.path.abspath(file_path)
+        if abs_path in ConceptVectorEngine._vector_cache:
+            logger.debug("Vectors loaded from memory cache | path=%s", abs_path)
+            return ConceptVectorEngine._vector_cache[abs_path]
+
         if not os.path.exists(file_path):
             raise FileNotFoundError(
                 f"Concept vector file not found: {file_path}"
@@ -192,14 +203,17 @@ class ConceptVectorEngine:
         # New format
         if isinstance(checkpoint, dict) and "vectors" in checkpoint:
             meta = checkpoint.get("metadata", {})
+            vectors = checkpoint["vectors"]
+            ConceptVectorEngine._vector_cache[abs_path] = vectors
             logger.info(
-                "Vectors loaded | path=%s | metadata=%s", file_path, meta
+                "Vectors loaded | path=%s | metadata=%s", abs_path, meta
             )
-            return checkpoint["vectors"]
+            return vectors
 
         # Legacy format — plain {layer: tensor} dict
         logger.warning(
             "Legacy vector format detected in %s. Consider re-extracting.",
             file_path,
         )
+        ConceptVectorEngine._vector_cache[abs_path] = checkpoint
         return checkpoint

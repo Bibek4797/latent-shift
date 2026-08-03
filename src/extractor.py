@@ -111,12 +111,20 @@ class ActivationExtractor:
 
         # ---- Forward passes ------------------------------------------------
         try:
-            for i, prompt in enumerate(prompts):
-                inputs = self.tokenizer(prompt, return_tensors="pt")
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                with torch.no_grad():
-                    self.model(**inputs)
-                logger.debug("Processed prompt %d/%d", i + 1, len(prompts))
+            with torch.inference_mode():
+                # Process in batches if multiple prompts provided
+                batch_size = 8
+                for b_start in range(0, len(prompts), batch_size):
+                    b_prompts = prompts[b_start : b_start + batch_size]
+                    if len(b_prompts) == 1:
+                        inputs = self.tokenizer(b_prompts[0], return_tensors="pt")
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                        self.model(**inputs)
+                    else:
+                        inputs = self.tokenizer(b_prompts, return_tensors="pt", padding=True)
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                        self.model(**inputs)
+                    logger.debug("Processed batch %d-%d/%d", b_start + 1, min(b_start + batch_size, len(prompts)), len(prompts))
         finally:
             for hook in hooks:
                 hook.remove()

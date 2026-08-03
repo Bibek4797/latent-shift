@@ -112,15 +112,17 @@ class SteeredGenerator:
             )
 
         def _make_hook(concept_vector: torch.Tensor, alpha_i: float):
+            # Pre-convert vector to target device & dtype once during registration
+            vec_cached = concept_vector.to(device=self.device, dtype=self.model.dtype if hasattr(self.model, "dtype") else torch.float32)
+
             def _steering_hook(
                 module: nn.Module,
                 input_args: Tuple,
                 output,
             ):
                 hidden = output[0] if isinstance(output, tuple) else output
-                vec = concept_vector.to(
-                    device=hidden.device, dtype=hidden.dtype
-                )
+                # Ensure placement alignment without re-allocating
+                vec = vec_cached if vec_cached.device == hidden.device and vec_cached.dtype == hidden.dtype else vec_cached.to(device=hidden.device, dtype=hidden.dtype)
                 steered = hidden + alpha_i * vec
                 if isinstance(output, tuple):
                     return (steered,) + output[1:]
@@ -166,13 +168,16 @@ class SteeredGenerator:
         dynamic_alpha_ref = self._dynamic_alpha
 
         def _make_dynamic_hook(concept_vector: torch.Tensor, ratio: float):
+            # Pre-convert vector to target device & dtype once during registration
+            vec_cached = concept_vector.to(device=self.device, dtype=self.model.dtype if hasattr(self.model, "dtype") else torch.float32)
+
             def _dynamic_steering_hook(
                 module: nn.Module,
                 input_args: Tuple,
                 output,
             ):
                 hidden = output[0] if isinstance(output, tuple) else output
-                vec = concept_vector.to(device=hidden.device, dtype=hidden.dtype)
+                vec = vec_cached if vec_cached.device == hidden.device and vec_cached.dtype == hidden.dtype else vec_cached.to(device=hidden.device, dtype=hidden.dtype)
                 effective_alpha = dynamic_alpha_ref[0] * ratio
                 steered = hidden + effective_alpha * vec
                 if isinstance(output, tuple):
@@ -269,7 +274,7 @@ class SteeredGenerator:
                 }
             )
 
-        with torch.no_grad():
+        with torch.inference_mode():
             output_ids = self.model.generate(**inputs, **gen_kwargs)
 
         input_len = inputs["input_ids"].shape[1]
@@ -351,55 +356,62 @@ class SteeredGenerator:
             input_ids = inputs["input_ids"]
 
             generated_tokens: List[int] = []
+            past_key_values = None
 
-            for step in range(max_new_tokens):
-                with torch.no_grad():
-                    outputs = self.model(input_ids=input_ids)
+            with torch.inference_mode():
+                for step in range(max_new_tokens):
+                    if past_key_values is None:
+                        outputs = self.model(input_ids=input_ids, use_cache=True)
+                    else:
+                        outputs = self.model(input_ids=curr_input, past_key_values=past_key_values, use_cache=True)
 
-                logits = outputs.logits[:, -1, :]  # (1, vocab_size)
+                    if hasattr(outputs, "past_key_values") and outputs.past_key_values is not None:
+                        past_key_values = outputs.past_key_values
 
-                # Compute alpha for this step
-                alpha_t = scheduler.step(
-                    step_idx=step,
-                    total_steps=max_new_tokens,
-                    logits=logits.squeeze(0),
-                )
-                trajectory.record(alpha_t)
-                self._dynamic_alpha[0] = alpha_t
+                    logits = outputs.logits[:, -1, :]  # (1, vocab_size)
 
-                # Sample next token
-                if do_sample:
-                    scaled_logits = logits / max(temperature, 1e-6)
+                    # Compute alpha for this step
+                    alpha_t = scheduler.step(
+                        step_idx=step,
+                        total_steps=max_new_tokens,
+                        logits=logits.squeeze(0),
+                    )
+                    trajectory.record(alpha_t)
+                    self._dynamic_alpha[0] = alpha_t
 
-                    # Top-k filtering
-                    if top_k > 0:
-                        topk_vals, topk_idx = torch.topk(scaled_logits, min(top_k, scaled_logits.size(-1)))
-                        mask = torch.full_like(scaled_logits, float("-inf"))
-                        mask.scatter_(1, topk_idx, topk_vals)
-                        scaled_logits = mask
+                    # Sample next token
+                    if do_sample:
+                        scaled_logits = logits / max(temperature, 1e-6)
 
-                    # Top-p (nucleus) filtering
-                    if top_p < 1.0:
-                        sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True)
-                        cum_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-                        remove_mask = cum_probs - torch.softmax(sorted_logits, dim=-1) >= top_p
-                        sorted_logits[remove_mask] = float("-inf")
-                        scaled_logits = scaled_logits.scatter(1, sorted_indices, sorted_logits)
+                        # Top-k filtering
+                        if top_k > 0:
+                            topk_vals, topk_idx = torch.topk(scaled_logits, min(top_k, scaled_logits.size(-1)))
+                            mask = torch.full_like(scaled_logits, float("-inf"))
+                            mask.scatter_(1, topk_idx, topk_vals)
+                            scaled_logits = mask
 
-                    probs = torch.softmax(scaled_logits, dim=-1)
-                    next_token = torch.multinomial(probs, num_samples=1)
-                else:
-                    next_token = logits.argmax(dim=-1, keepdim=True)
+                        # Top-p (nucleus) filtering
+                        if top_p < 1.0:
+                            sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True)
+                            cum_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                            remove_mask = cum_probs - torch.softmax(sorted_logits, dim=-1) >= top_p
+                            sorted_logits[remove_mask] = float("-inf")
+                            scaled_logits = scaled_logits.scatter(1, sorted_indices, sorted_logits)
 
-                token_id = next_token.item()
-                generated_tokens.append(token_id)
+                        probs = torch.softmax(scaled_logits, dim=-1)
+                        next_token = torch.multinomial(probs, num_samples=1)
+                    else:
+                        next_token = logits.argmax(dim=-1, keepdim=True)
 
-                # Check for EOS
-                if token_id == self.tokenizer.eos_token_id:
-                    break
+                    token_id = next_token.item()
+                    generated_tokens.append(token_id)
 
-                # Append to input for next step
-                input_ids = torch.cat([input_ids, next_token], dim=1)
+                    # Check for EOS
+                    if token_id == self.tokenizer.eos_token_id:
+                        break
+
+                    # Update curr_input for next token step
+                    curr_input = next_token
 
         finally:
             self.remove_steering_hooks()
