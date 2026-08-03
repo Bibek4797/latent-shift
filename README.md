@@ -15,6 +15,26 @@
 
 ---
 
+## 📚 Research Documentation & Academic Suite
+
+LatentShift includes a comprehensive, publication-grade research documentation suite:
+
+| Document | Description |
+|----------|-------------|
+| 📄 **[`RESEARCH_REPORT.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/RESEARCH_REPORT.md)** | Full academic research paper (Abstract, Method, Derivations, Results, Discussion, Citations) |
+| 📐 **[`docs/METHODOLOGY.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/METHODOLOGY.md)** | Theoretical framework & representation engineering principles |
+| 🧮 **[`docs/MATHEMATICAL_DERIVATIONS.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/MATHEMATICAL_DERIVATIONS.md)** | Rigorous LaTeX derivations for all 7 extractors, scoring methods & schedulers |
+| 🔬 **[`docs/EXPERIMENTAL_PROTOCOL.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/EXPERIMENTAL_PROTOCOL.md)** | Dataset curation, prompt pair guidelines & hyperparameter defaults |
+| 📊 **[`docs/BENCHMARK_PROTOCOL.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/BENCHMARK_PROTOCOL.md)** | Grid sweep specification, metric suite definitions ($PPL$, $D_{\text{KL}}$, $D_{\text{JS}}$) |
+| 🔄 **[`docs/REPRODUCIBILITY_GUIDE.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/REPRODUCIBILITY_GUIDE.md)** | Deterministic seeding, hardware setups, SQLite schema verification |
+| ⚠️ **[`docs/LIMITATIONS_AND_FUTURE_WORK.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/LIMITATIONS_AND_FUTURE_WORK.md)** | Limitations, activation drift, capacity bounds & research roadmap |
+| 🏗️ **[`docs/ARCHITECTURE_AND_DIAGRAMS.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/ARCHITECTURE_AND_DIAGRAMS.md)** | Mermaid diagrams (System Architecture, Autoregressive Loop, Sequence Flow) |
+| 🔌 **[`docs/API_DOCUMENTATION.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/API_DOCUMENTATION.md)** | Full API reference for core python classes & engines |
+| 🛠️ **[`docs/DEVELOPER_GUIDE.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/DEVELOPER_GUIDE.md)** | Architecture principles, extending extractors/schedulers & PR guidelines |
+
+---
+
+
 ## 📌 Overview
 
 **LatentShift** enables precise, dynamic behavioral alignment of Large Language Models (LLMs) **without weight updates, parameter fine-tuning (SFT), or RLHF/DPO**. 
