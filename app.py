@@ -22,9 +22,17 @@ from src.evaluator import (
     plot_metric_comparison,
     plot_steering_strength,
 )
+from src.layer_selector import (
+    LayerScoreResult,
+    LayerSelector,
+    plot_layer_scores_heatmap,
+    plot_layer_scores_line,
+    plot_top_k_layers_bar,
+)
 from src.utils import compute_layer_weights, get_logger
 
 logger = get_logger("app")
+
 
 
 
@@ -305,14 +313,38 @@ else:
 
 st.sidebar.header("🎯 Activation Steering Parameters")
 
-# Target layers multiselect
-default_layers = [i for i in range(num_layers // 3, num_layers // 2)]
-target_layers = st.sidebar.multiselect(
-    "Target Layers for Steering",
-    options=list(range(num_layers)),
-    default=default_layers,
-    help="Select the middle layers where the concept vectors will be injected."
+layer_selection_mode = st.sidebar.radio(
+    "Layer Selection Mode",
+    options=["Manual Mode", "Automatic Mode"],
+    index=0,
+    help="Manual Mode: Pick layers manually. Automatic Mode: Statistically rank layers to find optimal injection points."
 )
+
+if layer_selection_mode == "Manual Mode":
+    default_layers = [i for i in range(num_layers // 3, num_layers // 2)]
+    target_layers = st.sidebar.multiselect(
+        "Target Layers for Steering",
+        options=list(range(num_layers)),
+        default=default_layers,
+        help="Select target intermediate transformer layers for injection."
+    )
+    scoring_method = "Mean Separation"
+    top_k_val = len(target_layers)
+else:
+    scoring_method = st.sidebar.selectbox(
+        "Layer Scoring Method",
+        options=["Mean Separation", "Cosine Separation", "Fisher Score", "Signal-to-Noise Ratio (SNR)", "Activation Variance"],
+        index=0,
+        help="Statistical metric used to rank target layer informativeness."
+    )
+    scoring_key = scoring_method.lower().replace(" ", "_").replace("signal-to-noise_ratio_(snr)", "snr")
+
+    top_k_val = st.sidebar.select_slider(
+        "Select Top-K Layers",
+        options=[1, 3, 5, 8, 10],
+        value=5,
+        help="Number of highest-ranked layers to automatically select."
+    )
 
 # Steering coefficient alpha
 alpha = st.sidebar.slider(
@@ -353,17 +385,70 @@ extract_clicked = st.sidebar.button(
     help="Re-runs activation extraction over contrasting pairs."
 )
 
-# Maintain computed concept vectors in session state
+# Maintain computed concept vectors & layer scores in session state
 if "concept_vectors" not in st.session_state:
     st.session_state.concept_vectors = {}
     st.session_state.vector_concept_name = ""
     st.session_state.vector_method = ""
+    st.session_state.layer_scores_cache = {}
+    st.session_state.all_method_scores = {}
 
-# Ensure we have active concept vectors for the target layers
+# Handle Automatic Layer Selection Scoring & Top-K determination
+if layer_selection_mode == "Automatic Mode":
+    all_layers = list(range(num_layers))
+    scoring_key = scoring_method.lower().replace(" ", "_").replace("signal-to-noise_ratio_(snr)", "snr")
+
+    # Compute scores for all layers if needed
+    scores_needed = (
+        extract_clicked
+        or "scores" not in st.session_state.layer_scores_cache
+        or selected_concept != st.session_state.vector_concept_name
+    )
+
+    if scores_needed:
+        with st.spinner("Extracting all layer activations & computing statistical scores..."):
+            try:
+                if model_name.startswith("Mock-Model"):
+                    pos_acts, neg_acts = {}, {}
+                    center = num_layers / 2.0
+                    for l in all_layers:
+                        dist = abs(l - center)
+                        shift = max(0.1, 3.0 - 0.25 * dist)
+                        pos_acts[l] = torch.randn(8, 4096) + shift
+                        neg_acts[l] = torch.randn(8, 4096) - shift
+                else:
+                    extractor = ActivationExtractor(model, tokenizer, all_layers, config.device)
+                    pos_acts, neg_acts = extractor.extract_contrastive(CONCEPT_PAIRS[selected_concept])
+
+                # Score all methods for comprehensive analytics
+                all_methods = ["mean_separation", "cosine_separation", "fisher_score", "snr", "activation_variance"]
+                all_method_scores = {}
+                for m in all_methods:
+                    all_method_scores[m] = LayerSelector.score_layers(pos_acts, neg_acts, method=m)
+
+                st.session_state.layer_scores_cache = all_method_scores[scoring_key]
+                st.session_state.all_method_scores = all_method_scores
+                st.session_state.pos_acts_cache = pos_acts
+                st.session_state.neg_acts_cache = neg_acts
+
+            except Exception as e:
+                st.sidebar.error(f"Error scoring layers: {e}")
+
+    if scoring_key in st.session_state.all_method_scores:
+        scores_dict = st.session_state.all_method_scores[scoring_key]
+    else:
+        scores_dict = st.session_state.layer_scores_cache
+
+    if scores_dict:
+        target_layers = LayerSelector.select_top_k_layers(scores_dict, k=top_k_val, preserve_order=True)
+        st.sidebar.success(f"🎯 Auto-Selected Top-{len(target_layers)} Layers:\n{target_layers}")
+    else:
+        target_layers = [i for i in range(num_layers // 3, num_layers // 2)]
+
+# Ensure we have active concept vectors for target_layers
 vector_filename = f"{selected_concept.lower().replace(' ', '_').replace('/', '_')}_{comp_method.lower().replace(' ', '_')}.pt"
 vector_path = os.path.join(config.data_dir, vector_filename)
 
-# Check if vectors already exist, or if we need to compute them
 compute_needed = (
     extract_clicked
     or selected_concept != st.session_state.vector_concept_name
@@ -372,25 +457,22 @@ compute_needed = (
 )
 
 if compute_needed and len(target_layers) > 0:
-    with st.spinner("Extracting hidden states and computing concept vectors..."):
+    with st.spinner("Computing concept vectors for target layers..."):
         try:
             if model_name.startswith("Mock-Model"):
-                # Simulated extraction
                 sim_vectors = {}
                 for layer in target_layers:
-                    # Synthetic concept vector
                     sim_vectors[layer] = torch.randn(4096)
                 ConceptVectorEngine.save_vectors(
-                    sim_vectors, 
-                    config.data_dir, 
+                    sim_vectors,
+                    config.data_dir,
                     vector_filename,
                     metadata={"model_name": model_name, "concept": selected_concept, "method": comp_method, "mock": True},
                 )
             else:
-                # Real Extraction
                 extractor = ActivationExtractor(model, tokenizer, target_layers, config.device)
                 pos_acts, neg_acts = extractor.extract_contrastive(CONCEPT_PAIRS[selected_concept])
-                
+
                 computed_vectors = {}
                 for layer in target_layers:
                     if comp_method == "Mean Difference":
@@ -402,23 +484,24 @@ if compute_needed and len(target_layers) > 0:
                             pos_acts[layer], neg_acts[layer]
                         )
                 ConceptVectorEngine.save_vectors(
-                        computed_vectors,
-                        config.data_dir,
-                        vector_filename,
-                        metadata={
-                            "model_name": model_name,
-                            "concept": selected_concept,
-                            "method": comp_method,
-                            "layers": target_layers,
-                        },
-                    )
-                
+                    computed_vectors,
+                    config.data_dir,
+                    vector_filename,
+                    metadata={
+                        "model_name": model_name,
+                        "concept": selected_concept,
+                        "method": comp_method,
+                        "layers": target_layers,
+                    },
+                )
+
             st.session_state.concept_vectors = ConceptVectorEngine.load_vectors(vector_path)
             st.session_state.vector_concept_name = selected_concept
             st.session_state.vector_method = comp_method
-            st.sidebar.success("Concept vector computed and cached!")
+            st.sidebar.success("Concept vector computed & cached!")
         except Exception as e:
             st.sidebar.error(f"Error computing concept vector: {e}")
+
 
 # Apply state variables to mock tokenizer if necessary
 if model_name.startswith("Mock-Model"):
@@ -575,10 +658,11 @@ if generate_clicked and len(target_layers) > 0:
 
 st.subheader("📊 Steering Analytics & Activation Trajectory")
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "Adaptive Layer Weights & Vector Magnitudes",
     "Latent Trajectory Projection",
-    "Research Evaluation Metrics & Charts"
+    "Research Evaluation Metrics & Charts",
+    "Automatic Layer Selection & Ranking"
 ])
 
 with tab1:
@@ -691,5 +775,34 @@ with tab3:
         st.json(rep.to_dict())
     else:
         st.info("Run steering inference to generate full research evaluation metrics and distribution plots.")
+
+with tab4:
+    st.markdown("### 🎯 Automatic Layer Selection Analytics & Ranking")
+
+    if "layer_scores_cache" in st.session_state and st.session_state.layer_scores_cache:
+        current_scores = st.session_state.layer_scores_cache
+        ranked_results = LayerSelector.rank_layers(current_scores)
+
+        st.markdown(f"**Current Scoring Method**: `{scoring_method}` | **Selected Top-K**: `{top_k_val}`")
+        st.markdown(f"**Active Selected Steering Layers**: `{target_layers}`")
+
+        scol1, scol2 = st.columns(2)
+        with scol1:
+            st.plotly_chart(plot_layer_scores_line(current_scores, method_name=scoring_method), use_container_width=True)
+        with scol2:
+            st.plotly_chart(plot_top_k_layers_bar(current_scores, k=top_k_val, method_name=scoring_method), use_container_width=True)
+
+        if "all_method_scores" in st.session_state and st.session_state.all_method_scores:
+            st.plotly_chart(plot_layer_scores_heatmap(st.session_state.all_method_scores), use_container_width=True)
+
+        st.markdown("#### Ranked Layer Table")
+        table_data = [
+            {"Rank": r.rank, "Layer Index": r.layer_idx, "Score": f"{r.score:.6f}", "Selected": "✅ Top-K" if r.layer_idx in target_layers else "—"}
+            for r in ranked_results
+        ]
+        st.dataframe(table_data, use_container_width=True)
+    else:
+        st.info("Switch to **Automatic Mode** in the sidebar to compute and visualize statistical layer scores.")
+
 
 

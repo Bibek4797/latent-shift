@@ -52,11 +52,13 @@ from config import SteeringConfig
 from src.compute import ConceptVectorEngine
 from src.evaluator import SteeringEvaluator
 from src.extractor import ActivationExtractor
+from src.layer_selector import LayerSelector
 from src.model_loader import load_model_and_tokenizer
 from src.steer import SteeredGenerator
 from src.utils import get_logger, set_seed
 
 logger = get_logger("run_experiment")
+
 
 # ---------------------------------------------------------------------------
 # Built-in concept datasets (minimal, self-contained, no external files)
@@ -145,12 +147,31 @@ def parse_args() -> argparse.Namespace:
         help="Layer indices to apply steering on.",
     )
     parser.add_argument(
+        "--auto_layers",
+        action="store_true",
+        help="Enable Automatic Layer Selection using statistical layer scoring.",
+    )
+    parser.add_argument(
+        "--layer_scoring_method",
+        type=str,
+        default="mean_separation",
+        choices=["mean_separation", "cosine_separation", "fisher_score", "snr", "activation_variance"],
+        help="Statistical metric for automatic layer scoring.",
+    )
+    parser.add_argument(
+        "--top_k_layers",
+        type=int,
+        default=5,
+        help="Number of top-scoring layers to select when --auto_layers is enabled.",
+    )
+    parser.add_argument(
         "--strategy",
         type=str,
         default="uniform",
         choices=["uniform", "linear_decay", "cosine_decay"],
         help="Adaptive multi-layer weighting strategy.",
     )
+
     parser.add_argument(
         "--prompt",
         type=str,
@@ -235,11 +256,30 @@ def main() -> None:
         load_in_8bit=args.load_in_8bit,
     )
 
-    # ---- Extract Concept Vectors -------------------------------------------
+    # ---- Extract Concept Vectors & Perform Auto Layer Selection -------------
     pairs = get_pairs(args.concept)
-    extractor = ActivationExtractor(model, tokenizer, args.layers, config.device)
-    logger.info("Extracting activations for %d contrastive pairs...", len(pairs))
-    pos_acts, neg_acts = extractor.extract_contrastive(pairs)
+
+    if args.auto_layers:
+        if hasattr(model, "model") and hasattr(model.model, "layers"):
+            num_layers = len(model.model.layers)
+        elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
+            num_layers = len(model.transformer.h)
+        else:
+            num_layers = 12
+
+        all_layers = list(range(num_layers))
+        logger.info("Automatic Layer Selection enabled | Scoring method: '%s' | Top-K: %d", args.layer_scoring_method, args.top_k_layers)
+        auto_extractor = ActivationExtractor(model, tokenizer, all_layers, config.device)
+        pos_acts_all, neg_acts_all = auto_extractor.extract_contrastive(pairs)
+        scores_map = LayerSelector.score_layers(pos_acts_all, neg_acts_all, method=args.layer_scoring_method)
+        args.layers = LayerSelector.select_top_k_layers(scores_map, k=args.top_k_layers, preserve_order=True)
+        logger.info("Automatically selected Top-%d layers: %s", len(args.layers), args.layers)
+        pos_acts, neg_acts = pos_acts_all, neg_acts_all
+    else:
+        extractor = ActivationExtractor(model, tokenizer, args.layers, config.device)
+        logger.info("Extracting activations for %d contrastive pairs on manual layers %s...", len(pairs), args.layers)
+        pos_acts, neg_acts = extractor.extract_contrastive(pairs)
+
 
     concept_vectors: dict = {}
     for layer in args.layers:

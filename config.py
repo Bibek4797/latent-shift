@@ -34,7 +34,11 @@ class SteeringConfig:
     default_layers: List[int] = field(default_factory=lambda: [12, 13, 14, 15, 16])
     default_alpha: float = 2.0
     default_strategy: str = "uniform"
+    layer_selection_mode: str = "manual"
+    layer_scoring_method: str = "mean_separation"
+    top_k_layers: int = 5
     data_dir: str = "data/concept_vectors"
+
 
 
     @property

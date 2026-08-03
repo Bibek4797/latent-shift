@@ -427,6 +427,66 @@ class TestSteeredGeneratorHooks(unittest.TestCase):
             self.generator.generate("   ")
 
 
+class TestLayerSelector(unittest.TestCase):
+    """Tests for LayerSelector scoring functions and ranking."""
+
+    def setUp(self):
+        from src.layer_selector import LayerSelector
+        self.selector = LayerSelector
+        self.pos_acts = torch.tensor([[1.0, 2.0], [2.0, 3.0]])
+        self.neg_acts = torch.tensor([[-1.0, -2.0], [-2.0, -3.0]])
+
+    def test_compute_mean_separation(self):
+        sep = self.selector.compute_mean_separation(self.pos_acts, self.neg_acts)
+        self.assertGreater(sep, 0.0)
+
+    def test_compute_cosine_separation(self):
+        sep = self.selector.compute_cosine_separation(self.pos_acts, self.neg_acts)
+        self.assertAlmostEqual(sep, 2.0, places=4)
+
+    def test_compute_fisher_score(self):
+        score = self.selector.compute_fisher_score(self.pos_acts, self.neg_acts)
+        self.assertGreater(score, 0.0)
+
+    def test_compute_snr(self):
+        snr = self.selector.compute_snr(self.pos_acts, self.neg_acts)
+        self.assertGreater(snr, 0.0)
+
+    def test_compute_activation_variance(self):
+        var = self.selector.compute_activation_variance(self.pos_acts, self.neg_acts)
+        self.assertGreater(var, 0.0)
+
+    def test_score_layers_all_methods(self):
+        pos_dict = {0: self.pos_acts, 1: self.pos_acts * 2.0}
+        neg_dict = {0: self.neg_acts, 1: self.neg_acts * 2.0}
+        methods = ["mean_separation", "cosine_separation", "fisher_score", "snr", "activation_variance"]
+        for m in methods:
+            scores = self.selector.score_layers(pos_dict, neg_dict, method=m)
+            self.assertEqual(len(scores), 2)
+            self.assertIn(0, scores)
+            self.assertIn(1, scores)
+
+    def test_rank_layers(self):
+        scores = {0: 1.2, 1: 4.5, 2: 2.3}
+        ranked = self.selector.rank_layers(scores)
+        self.assertEqual(ranked[0].layer_idx, 1)
+        self.assertEqual(ranked[0].rank, 1)
+        self.assertEqual(ranked[1].layer_idx, 2)
+        self.assertEqual(ranked[2].layer_idx, 0)
+
+    def test_select_top_k_layers(self):
+        scores = {0: 1.2, 1: 4.5, 2: 2.3, 3: 0.1}
+        top_2 = self.selector.select_top_k_layers(scores, k=2, preserve_order=True)
+        self.assertEqual(top_2, [1, 2])
+
+    def test_invalid_scoring_method_raises(self):
+        pos_dict = {0: self.pos_acts}
+        neg_dict = {0: self.neg_acts}
+        with self.assertRaises(ValueError):
+            self.selector.score_layers(pos_dict, neg_dict, method="unknown_metric")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 

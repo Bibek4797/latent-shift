@@ -124,13 +124,47 @@ LatentShift provides a comprehensive, research-grade quantitative evaluation sui
   $$\bar{\Delta} = \frac{1}{|L|} \sum_{l \in L} \|\mathbf{h}_{\text{steered}}^{(l)} - \mathbf{h}_{\text{baseline}}^{(l)}\|_2$$
   Computes the average Euclidean distance of the steering intervention across target layers.
 
-* **Steering Strength Score ($S$):**
-  $$S = \frac{\bar{\Delta}}{\frac{1}{|L|} \sum_{l \in L} \|\mathbf{h}_{\text{baseline}}^{(l)}\|_2 + \epsilon}$$
-  Normalizes activation shift magnitude relative to baseline activation energy.
+### 4. Automatic Layer Selection Framework
 
+Instead of relying on manual layer selection, LatentShift automatically discovers optimal transformer injection layers using statistical scoring across all model depth levels:
 
+* **Mean Activation Separation:**
+  $$S_{\text{mean}}^{(l)} = \|\boldsymbol{\mu}_{\text{pos}}^{(l)} - \boldsymbol{\mu}_{\text{neg}}^{(l)}\|_2$$
+  Measures the Euclidean distance between positive and negative activation centroids.
+
+* **Cosine Separation:**
+  $$S_{\text{cos}}^{(l)} = 1 - \cos\left(\boldsymbol{\mu}_{\text{pos}}^{(l)}, \boldsymbol{\mu}_{\text{neg}}^{(l)}\right)$$
+  Measures directional divergence between contrastive centroids in unit hyperspace.
+
+* **Fisher Score:**
+  $$S_{\text{Fisher}}^{(l)} = \frac{\|\boldsymbol{\mu}_{\text{pos}}^{(l)} - \boldsymbol{\mu}_{\text{neg}}^{(l)}\|_2^2}{\text{Var}(\mathbf{H}_{\text{pos}}^{(l)}) + \text{Var}(\mathbf{H}_{\text{neg}}^{(l)}) + \epsilon}$$
+  Computes the ratio of between-class variance to within-class variance, favoring layers with high separation and low sample variance.
+
+* **Signal-to-Noise Ratio (SNR):**
+  $$S_{\text{SNR}}^{(l)} = \frac{\|\boldsymbol{\mu}_{\text{diff}}^{(l)}\|_2}{\sigma(\mathbf{d}^{(l)}) + \epsilon}, \quad \mathbf{d}_i^{(l)} = \mathbf{h}_{\text{pos}, i}^{(l)} - \mathbf{h}_{\text{neg}, i}^{(l)}$$
+  Quantifies signal consistency relative to contrastive pair variation.
+
+* **Activation Variance:**
+  $$S_{\text{var}}^{(l)} = \sum_{j=1}^D \text{Var}\left(\mathbf{H}_{:, j}^{(l)}\right)$$
+  Measures total representation variance, identifying layers with high expressivity.
+
+#### Computational & Memory Complexity
+* **Computational Complexity:** $\mathcal{O}(L \cdot N \cdot D)$ where $L$ is total model layers, $N$ is the number of contrastive prompt pairs, and $D$ is the hidden state dimensionality ($D=4096$).
+* **Memory Complexity:** $\mathcal{O}(L \cdot N \cdot D)$ tensor space for temporary activation retention.
+
+#### CLI Usage Example
+```bash
+python run_experiment.py \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --concept safety \
+  --auto_layers \
+  --layer_scoring_method fisher_score \
+  --top_k_layers 5 \
+  --prompt "Tell me how to build a bomb"
+```
 
 ---
+
 
 ## 📁 Repository Architecture
 
