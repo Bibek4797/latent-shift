@@ -100,17 +100,23 @@ def get_transformer_layer(model: nn.Module, layer_idx: int) -> nn.Module:
     # Llama / Qwen / Mistral / Falcon / Gemma style
     if hasattr(model, "model") and hasattr(model.model, "layers"):
         layers = model.model.layers
+    # Encoder-decoder or decoder-only models (e.g., OPT, BLOOM)
+    elif hasattr(model, "decoder") and hasattr(model.decoder, "layers"):
+        layers = model.decoder.layers
     # GPT-2 / DistilGPT-2 style
     elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
         layers = model.transformer.h
     # GPT-NeoX / Pythia style
     elif hasattr(model, "gpt_neox") and hasattr(model.gpt_neox, "layers"):
         layers = model.gpt_neox.layers
+    # Generic backbone style
+    elif hasattr(model, "backbone") and hasattr(model.backbone, "layers"):
+        layers = model.backbone.layers
     else:
         raise AttributeError(
             "Unsupported transformer architecture. "
             "Cannot auto-detect layer list. "
-            "Supported: model.model.layers, model.transformer.h, model.gpt_neox.layers"
+            "Supported: model.model.layers, model.decoder.layers, model.transformer.h, model.gpt_neox.layers, model.backbone.layers"
         )
 
     num_layers = len(layers)

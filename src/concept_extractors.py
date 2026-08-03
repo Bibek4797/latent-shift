@@ -112,7 +112,7 @@ class PCAExtractor(BaseConceptExtractor):
     def extract(self, pos_activations: torch.Tensor, neg_activations: torch.Tensor, normalize: bool = False, **kwargs) -> torch.Tensor:
         orig_dtype = pos_activations.dtype
         min_samples = min(pos_activations.shape[0], neg_activations.shape[0])
-        diffs_np = (pos_activations[:min_samples] - neg_activations[:min_samples]).to(torch.float32).numpy()
+        diffs_np = (pos_activations[:min_samples] - neg_activations[:min_samples]).detach().cpu().to(torch.float32).numpy()
 
         pca = PCA(n_components=1)
         pca.fit(diffs_np)
@@ -130,8 +130,8 @@ class LDAExtractor(BaseConceptExtractor):
 
     def extract(self, pos_activations: torch.Tensor, neg_activations: torch.Tensor, normalize: bool = False, **kwargs) -> torch.Tensor:
         orig_dtype = pos_activations.dtype
-        pos_np = pos_activations.to(torch.float32).numpy()
-        neg_np = neg_activations.to(torch.float32).numpy()
+        pos_np = pos_activations.detach().cpu().to(torch.float32).numpy()
+        neg_np = neg_activations.detach().cpu().to(torch.float32).numpy()
 
         X = np.vstack([pos_np, neg_np])
         y = np.hstack([np.ones(pos_np.shape[0]), np.zeros(neg_np.shape[0])])
@@ -152,8 +152,8 @@ class LogisticRegressionExtractor(BaseConceptExtractor):
 
     def extract(self, pos_activations: torch.Tensor, neg_activations: torch.Tensor, normalize: bool = False, C: float = 1.0, **kwargs) -> torch.Tensor:
         orig_dtype = pos_activations.dtype
-        pos_np = pos_activations.to(torch.float32).numpy()
-        neg_np = neg_activations.to(torch.float32).numpy()
+        pos_np = pos_activations.detach().cpu().to(torch.float32).numpy()
+        neg_np = neg_activations.detach().cpu().to(torch.float32).numpy()
 
         X = np.vstack([pos_np, neg_np])
         y = np.hstack([np.ones(pos_np.shape[0]), np.zeros(neg_np.shape[0])])
@@ -174,8 +174,8 @@ class LinearSVMExtractor(BaseConceptExtractor):
 
     def extract(self, pos_activations: torch.Tensor, neg_activations: torch.Tensor, normalize: bool = False, C: float = 1.0, **kwargs) -> torch.Tensor:
         orig_dtype = pos_activations.dtype
-        pos_np = pos_activations.to(torch.float32).numpy()
-        neg_np = neg_activations.to(torch.float32).numpy()
+        pos_np = pos_activations.detach().cpu().to(torch.float32).numpy()
+        neg_np = neg_activations.detach().cpu().to(torch.float32).numpy()
 
         X = np.vstack([pos_np, neg_np])
         y = np.hstack([np.ones(pos_np.shape[0]), -np.ones(neg_np.shape[0])])
@@ -197,7 +197,7 @@ class SparsePCAExtractor(BaseConceptExtractor):
     def extract(self, pos_activations: torch.Tensor, neg_activations: torch.Tensor, normalize: bool = False, alpha: float = 1.0, **kwargs) -> torch.Tensor:
         orig_dtype = pos_activations.dtype
         min_samples = min(pos_activations.shape[0], neg_activations.shape[0])
-        diffs_np = (pos_activations[:min_samples] - neg_activations[:min_samples]).to(torch.float32).numpy()
+        diffs_np = (pos_activations[:min_samples] - neg_activations[:min_samples]).detach().cpu().to(torch.float32).numpy()
 
         spca = SparsePCA(n_components=1, alpha=alpha, random_state=42)
         spca.fit(diffs_np)
@@ -215,8 +215,8 @@ class TruncatedSVDExtractor(BaseConceptExtractor):
 
     def extract(self, pos_activations: torch.Tensor, neg_activations: torch.Tensor, normalize: bool = False, **kwargs) -> torch.Tensor:
         orig_dtype = pos_activations.dtype
-        pos_np = pos_activations.to(torch.float32).numpy()
-        neg_np = neg_activations.to(torch.float32).numpy()
+        pos_np = pos_activations.detach().cpu().to(torch.float32).numpy()
+        neg_np = neg_activations.detach().cpu().to(torch.float32).numpy()
 
         X = np.vstack([pos_np, -neg_np])
         svd = TruncatedSVD(n_components=1, random_state=42)
