@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use LatentShift in your research or project, please cite it as below."
+title: "LatentShift: Zero-Shot Large Language Model Alignment via Real-Time Closed-Loop Activation Steering"
+authors:
+  - family-names: "Dutta"
+    given-names: "Bibek"
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/Bibek4797/latent-shift"
+url: "https://github.com/Bibek4797/latent-shift"
+type: software
+license: MIT
+version: 2.0.0
+date-released: 2026-08-03
+keywords:
+  - representation engineering
+  - activation steering
+  - large language models
+  - zero-shot alignment
+  - closed-loop control
+  - AI safety

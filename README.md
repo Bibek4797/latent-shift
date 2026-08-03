@@ -32,6 +32,13 @@ LatentShift includes a comprehensive, publication-grade research documentation s
 | 🔌 **[`docs/API_DOCUMENTATION.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/API_DOCUMENTATION.md)** | Full API reference for core python classes & engines |
 | 🛠️ **[`docs/DEVELOPER_GUIDE.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/docs/DEVELOPER_GUIDE.md)** | Architecture principles, extending extractors/schedulers & PR guidelines |
 
+| 💡 **[`examples/`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/examples)** | 6 runnable Python tutorials (Basic steering, Adaptive decay, Dynamic closed-loop, Auto-layer, Multi-method, Tracking) |
+| 🏷️ **[`CITATION.cff`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/CITATION.cff)** | Citation File Format for BibTeX & academic attribution |
+| 🤝 **[`CONTRIBUTING.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/CONTRIBUTING.md)** | Developer contribution guidelines, code formatting & PR conventions |
+| 🗺️ **[`ROADMAP.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/ROADMAP.md)** | Multi-phase research roadmap & feature milestones |
+| 🚀 **[`RELEASE_NOTES.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/RELEASE_NOTES.md)** | Official v2.0.0 publication release notes |
+| 📜 **[`CHANGELOG.md`](file:///c:/Users/BIBEK/OneDrive/Desktop/Zero-Shot%20LLM%20Alignment%20via%20Real-Time%20Activation%20Steering/CHANGELOG.md)** | Complete version history & semantic changelog |
+
 ---
 
 
