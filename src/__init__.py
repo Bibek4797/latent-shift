@@ -50,6 +50,15 @@ from src.schedulers import (
     plot_token_steering_strength,
 )
 from src.steer import SteeredGenerator
+from src.experiment_tracker import (
+    ExperimentRecord,
+    ExperimentTracker,
+    get_git_commit,
+    get_system_memory,
+    plot_experiment_comparison,
+    plot_experiment_radar,
+    plot_experiment_timeline,
+)
 from src.utils import compute_layer_weights, get_logger, normalize_vector, set_seed
 
 from config import SteeringConfig
@@ -98,6 +107,15 @@ __all__ = [
     "plot_benchmark_radar_chart",
     "plot_benchmark_heatmap",
     "plot_benchmark_leaderboard",
+    # Experiment Tracker
+    "ExperimentRecord",
+    "ExperimentTracker",
+    "get_git_commit",
+    "get_system_memory",
+    "plot_experiment_timeline",
+    "plot_experiment_comparison",
+    "plot_experiment_radar",
+    # Utilities
     "compute_layer_weights",
     "get_logger",
     "set_seed",

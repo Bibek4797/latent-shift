@@ -338,6 +338,75 @@ print(f"📊 Steered Perplexity: {ppl:.3f}")
 
 ---
 
+## 📋 Experiment Tracking System
+
+Every steering experiment is automatically tracked in a local SQLite database. No manual logging needed — the framework captures a complete snapshot for every run.
+
+### Auto-Captured Fields
+
+| Field | Description |
+|-------|-------------|
+| `experiment_id` | Unique UUID for each experiment |
+| `model_name` | Hugging Face model identifier |
+| `layers` | Target transformer layer indices |
+| `alpha` | Steering intensity coefficient |
+| `weight_strategy` | Adaptive weighting strategy |
+| `scheduler` | Dynamic alpha scheduler |
+| `concept` | Steering concept name |
+| `extraction_method` | Concept vector extraction method |
+| `prompt` | Input prompt text |
+| `baseline_text` | Unsteered generation output |
+| `steered_text` | Steered generation output |
+| `ppl_baseline / ppl_steered` | Perplexity metrics |
+| `cosine_sim` | Embedding cosine similarity |
+| `kl_divergence / js_divergence` | Distribution divergence |
+| `entropy_baseline / entropy_steered` | Token entropy |
+| `steering_strength_score` | Normalised steering intensity |
+| `runtime_ms` | Wall-clock time (ms) |
+| `cpu_memory_mb / gpu_memory_mb` | Memory consumption |
+| `timestamp` | ISO-format UTC timestamp |
+| `git_commit` | Short git commit hash (auto-detected) |
+
+### Python API
+
+```python
+from src.experiment_tracker import ExperimentTracker, ExperimentRecord
+
+# Initialize tracker (creates DB on first run)
+tracker = ExperimentTracker(db_path="data/experiments.db")
+
+# Browse experiments
+all_exps = tracker.list_experiments(limit=50, concept_filter="safety")
+
+# Get a specific experiment
+exp = tracker.get_experiment("abc12345-...")
+
+# Compare multiple experiments
+compared = tracker.compare_experiments(["id-1", "id-2", "id-3"])
+
+# Get unique values for filter dropdowns
+models = tracker.get_unique_values("model_name")
+
+# Export
+tracker.export_experiments_csv("results/experiments.csv")
+tracker.export_experiments_json("results/experiments.json")
+```
+
+### Streamlit Integration
+
+Tab 8 (**Experiment Tracker & History**) provides:
+- **Filterable experiment table** — filter by model, concept, method
+- **Side-by-side comparison** — select 2+ experiments with bar charts and radar plots
+- **Experiment timeline** — scatter plot of experiments over time
+- **Reload experiment** — view full baseline/steered outputs and metrics
+- **Export** — download as JSON or CSV
+
+### CLI Integration
+
+Experiments are automatically logged when running `run_experiment.py`. No additional flags needed.
+
+---
+
 ## 🔄 Dynamic Closed-Loop Steering
 
 Traditional activation steering applies a **fixed** steering coefficient α throughout the entire generation. Dynamic Closed-Loop Steering introduces **token-level alpha adaptation**, where α evolves during autoregressive decoding based on a configurable scheduler.

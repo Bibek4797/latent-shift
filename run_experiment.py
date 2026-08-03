@@ -57,6 +57,7 @@ from src.extractor import ActivationExtractor
 from src.layer_selector import LayerSelector
 from src.model_loader import load_model_and_tokenizer
 from src.schedulers import build_scheduler
+from src.experiment_tracker import ExperimentRecord, ExperimentTracker, get_system_memory
 from src.steer import SteeredGenerator
 from src.utils import get_logger, set_seed
 
@@ -588,6 +589,41 @@ def main() -> None:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     logger.info("Results saved to: %s", output_path)
+
+    # ---- Auto-log to Experiment Tracker ------------------------------------
+    try:
+        cpu_mem, gpu_mem = get_system_memory()
+        tracker = ExperimentTracker(db_path=os.path.join("data", "experiments.db"))
+        exp_record = ExperimentRecord(
+            model_name=args.model,
+            layers=args.layers,
+            alpha=args.alpha,
+            weight_strategy=args.strategy,
+            scheduler=args.scheduler,
+            concept=args.concept,
+            extraction_method=args.method,
+            prompt=args.prompt,
+            baseline_text=baseline,
+            steered_text=steered,
+            ppl_baseline=eval_report.ppl_baseline,
+            ppl_steered=eval_report.ppl_steered,
+            delta_ppl=eval_report.delta_ppl,
+            ppl_ratio=eval_report.ppl_ratio,
+            cosine_sim=eval_report.cosine_sim,
+            kl_divergence=eval_report.kl_divergence,
+            js_divergence=eval_report.js_divergence,
+            entropy_baseline=eval_report.entropy_baseline,
+            entropy_steered=eval_report.entropy_steered,
+            steering_strength_score=eval_report.steering_strength_score,
+            runtime_ms=0.0,
+            cpu_memory_mb=cpu_mem,
+            gpu_memory_mb=gpu_mem,
+        )
+        tracker.log_experiment(exp_record)
+        logger.info("Experiment tracked | id=%s", exp_record.experiment_id[:8])
+    except Exception as e:
+        logger.warning("Failed to log experiment to tracker: %s", e)
+
     logger.info("Experiment complete.")
 
 

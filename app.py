@@ -52,6 +52,14 @@ from src.schedulers import (
     plot_alpha_trajectory,
     plot_token_steering_strength,
 )
+from src.experiment_tracker import (
+    ExperimentRecord,
+    ExperimentTracker,
+    get_system_memory,
+    plot_experiment_comparison,
+    plot_experiment_radar,
+    plot_experiment_timeline,
+)
 from src.utils import compute_layer_weights, get_logger
 
 
@@ -708,6 +716,41 @@ if generate_clicked and len(target_layers) > 0:
                 )
                 st.session_state.last_report = eval_report
 
+                # Auto-log experiment to SQLite tracker
+                import time as _time
+                try:
+                    _tracker = ExperimentTracker(db_path=os.path.join(config.data_dir, "experiments.db"))
+                    cpu_mem, gpu_mem = get_system_memory()
+                    _exp_record = ExperimentRecord(
+                        model_name=model_name,
+                        layers=target_layers,
+                        alpha=alpha,
+                        weight_strategy=strategy_key,
+                        scheduler=selected_scheduler_key,
+                        concept=selected_concept,
+                        extraction_method=comp_method_key,
+                        prompt=prompt_input,
+                        baseline_text=baseline_text,
+                        steered_text=steered_text,
+                        ppl_baseline=eval_report.ppl_baseline,
+                        ppl_steered=eval_report.ppl_steered,
+                        delta_ppl=eval_report.delta_ppl,
+                        ppl_ratio=eval_report.ppl_ratio,
+                        cosine_sim=eval_report.cosine_sim,
+                        kl_divergence=eval_report.kl_divergence,
+                        js_divergence=eval_report.js_divergence,
+                        entropy_baseline=eval_report.entropy_baseline,
+                        entropy_steered=eval_report.entropy_steered,
+                        steering_strength_score=eval_report.steering_strength_score,
+                        runtime_ms=0.0,
+                        cpu_memory_mb=cpu_mem,
+                        gpu_memory_mb=gpu_mem,
+                    )
+                    _tracker.log_experiment(_exp_record)
+                    st.toast(f"✅ Experiment logged: {_exp_record.experiment_id[:8]}")
+                except Exception as _te:
+                    logger.warning("Failed to log experiment: %s", _te)
+
                 ppl_baseline = eval_report.ppl_baseline
                 ppl_steered = eval_report.ppl_steered
 
@@ -771,7 +814,7 @@ if generate_clicked and len(target_layers) > 0:
 
 st.subheader("📊 Steering Analytics & Activation Trajectory")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Adaptive Layer Weights & Vector Magnitudes",
     "Latent Trajectory Projection",
     "Research Evaluation Metrics & Charts",
@@ -779,6 +822,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Concept Extractor Benchmark & Comparison",
     "Research Benchmark Suite & Leaderboards",
     "Dynamic Closed-Loop Steering",
+    "Experiment Tracker & History",
 ])
 
 with tab1:
@@ -1260,3 +1304,159 @@ with tab7:
             "Select a dynamic scheduler (Linear, Cosine, Confidence, Entropy) in the sidebar, "
             "then click **🔄 Run Dynamic Closed-Loop Steering** to generate with adaptive alpha."
         )
+
+with tab8:
+    st.markdown("### 📋 Experiment Tracker & History")
+    st.markdown(
+        "Browse, compare, and reload past steering experiments. "
+        "Every experiment is automatically saved to a local SQLite database."
+    )
+
+    try:
+        _tracker_ui = ExperimentTracker(db_path=os.path.join(config.data_dir, "experiments.db"))
+        total_exps = _tracker_ui.count_experiments()
+        st.metric("Total Tracked Experiments", total_exps)
+
+        if total_exps > 0:
+            # Filter controls
+            st.markdown("#### 🔍 Filters")
+            fcol1, fcol2, fcol3 = st.columns(3)
+            with fcol1:
+                avail_models = _tracker_ui.get_unique_values("model_name")
+                filter_model = st.selectbox("Filter by Model", options=["All"] + avail_models, index=0, key="exp_filter_model")
+            with fcol2:
+                avail_concepts = _tracker_ui.get_unique_values("concept")
+                filter_concept = st.selectbox("Filter by Concept", options=["All"] + avail_concepts, index=0, key="exp_filter_concept")
+            with fcol3:
+                avail_methods = _tracker_ui.get_unique_values("extraction_method")
+                filter_method = st.selectbox("Filter by Method", options=["All"] + avail_methods, index=0, key="exp_filter_method")
+
+            # Fetch filtered experiments
+            _exps = _tracker_ui.list_experiments(
+                limit=50,
+                model_filter=filter_model if filter_model != "All" else None,
+                concept_filter=filter_concept if filter_concept != "All" else None,
+                method_filter=filter_method if filter_method != "All" else None,
+            )
+
+            if _exps:
+                # Display experiment table
+                st.markdown(f"#### Showing {len(_exps)} experiments")
+                exp_table = [
+                    {
+                        "ID": e.experiment_id[:8],
+                        "Model": e.model_name,
+                        "Concept": e.concept,
+                        "Method": e.extraction_method,
+                        "α": e.alpha,
+                        "Strategy": e.weight_strategy,
+                        "Scheduler": e.scheduler,
+                        "PPL Ratio": f"{e.ppl_ratio:.3f}",
+                        "Cosine Sim": f"{e.cosine_sim:.4f}",
+                        "KL Div": f"{e.kl_divergence:.4f}",
+                        "Strength": f"{e.steering_strength_score:.4f}",
+                        "Timestamp": e.timestamp,
+                        "Git": e.git_commit[:7] if e.git_commit else "—",
+                    }
+                    for e in _exps
+                ]
+                st.dataframe(exp_table, use_container_width=True)
+
+                # Comparison mode
+                st.markdown("#### 🔀 Compare Experiments")
+                exp_ids_for_compare = st.multiselect(
+                    "Select experiments to compare",
+                    options=[f"{e.experiment_id[:8]} | {e.concept} | {e.extraction_method} | α={e.alpha}" for e in _exps],
+                    key="exp_compare_select",
+                )
+
+                if len(exp_ids_for_compare) >= 2:
+                    selected_full_ids = [
+                        _exps[i].experiment_id
+                        for i, e in enumerate(_exps)
+                        if f"{e.experiment_id[:8]} | {e.concept} | {e.extraction_method} | α={e.alpha}" in exp_ids_for_compare
+                    ]
+                    compare_records = _tracker_ui.compare_experiments(selected_full_ids)
+
+                    if compare_records:
+                        # Metric selector
+                        compare_metric = st.selectbox(
+                            "Comparison Metric",
+                            options=["ppl_ratio", "cosine_sim", "kl_divergence", "js_divergence",
+                                     "steering_strength_score", "delta_ppl", "runtime_ms"],
+                            index=0,
+                            key="exp_compare_metric",
+                        )
+
+                        ccol1, ccol2 = st.columns(2)
+                        with ccol1:
+                            st.plotly_chart(
+                                plot_experiment_comparison(compare_records, metric=compare_metric),
+                                use_container_width=True,
+                            )
+                        with ccol2:
+                            st.plotly_chart(
+                                plot_experiment_radar(compare_records),
+                                use_container_width=True,
+                            )
+
+                # Timeline
+                if len(_exps) >= 2:
+                    st.markdown("#### 📈 Experiment Timeline")
+                    st.plotly_chart(plot_experiment_timeline(_exps), use_container_width=True)
+
+                # Reload experiment
+                st.markdown("#### 🔄 Reload Experiment")
+                reload_options = [f"{e.experiment_id[:8]} | {e.concept} | α={e.alpha} | {e.timestamp}" for e in _exps]
+                reload_choice = st.selectbox("Select experiment to reload", options=reload_options, key="exp_reload_select")
+                if st.button("🔄 Reload Selected Experiment", key="reload_btn"):
+                    reload_idx = reload_options.index(reload_choice)
+                    reloaded = _exps[reload_idx]
+                    st.markdown(f"**Experiment ID**: `{reloaded.experiment_id}`")
+                    st.markdown(f"**Git Commit**: `{reloaded.git_commit or 'N/A'}`")
+
+                    rcol1, rcol2 = st.columns(2)
+                    with rcol1:
+                        st.subheader("⚪ Baseline Output")
+                        st.write(reloaded.baseline_text)
+                    with rcol2:
+                        st.subheader("🔮 Steered Output")
+                        st.write(reloaded.steered_text)
+
+                    st.json(reloaded.to_dict())
+
+                # Export
+                st.markdown("#### 📥 Export")
+                ecol1, ecol2 = st.columns(2)
+                with ecol1:
+                    import json as _json_exp
+                    all_dicts = [e.to_dict() for e in _exps]
+                    st.download_button(
+                        "📥 Export as JSON",
+                        data=_json_exp.dumps(all_dicts, indent=2),
+                        file_name="experiments_export.json",
+                        mime="application/json",
+                    )
+                with ecol2:
+                    import csv as _csv_mod
+                    import io as _io_mod
+                    buf = _io_mod.StringIO()
+                    if all_dicts:
+                        writer = _csv_mod.DictWriter(buf, fieldnames=all_dicts[0].keys())
+                        writer.writeheader()
+                        for d in all_dicts:
+                            d_copy = dict(d)
+                            d_copy["layers"] = str(d_copy["layers"])
+                            writer.writerow(d_copy)
+                    st.download_button(
+                        "📥 Export as CSV",
+                        data=buf.getvalue(),
+                        file_name="experiments_export.csv",
+                        mime="text/csv",
+                    )
+            else:
+                st.info("No experiments match the current filters.")
+        else:
+            st.info("No experiments tracked yet. Run a steering inference to automatically log your first experiment.")
+    except Exception as _tracker_err:
+        st.error(f"Experiment tracker error: {_tracker_err}")

@@ -16,6 +16,7 @@ Uses lightweight mock objects (no real LLM required) to validate:
 - SteeringEvaluator.compute_perplexity() basic contract
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -873,6 +874,238 @@ class TestCustomScheduler(unittest.TestCase):
         from src.schedulers import SCHEDULER_REGISTRY
         for key in ["fixed", "linear", "cosine", "confidence", "entropy"]:
             self.assertIn(key, SCHEDULER_REGISTRY)
+
+
+# ===========================================================================
+# TEST: Experiment Tracker
+# ===========================================================================
+
+class TestExperimentRecord(unittest.TestCase):
+    """Validate ExperimentRecord dataclass."""
+
+    def test_auto_generated_fields(self):
+        from src.experiment_tracker import ExperimentRecord
+        rec = ExperimentRecord(model_name="gpt2", concept="safety")
+        self.assertTrue(len(rec.experiment_id) > 0)
+        self.assertIn("UTC", rec.timestamp)
+        # git_commit may be empty if not in a repo, that's fine
+        self.assertIsInstance(rec.git_commit, str)
+
+    def test_to_dict(self):
+        from src.experiment_tracker import ExperimentRecord
+        rec = ExperimentRecord(
+            model_name="gpt2",
+            layers=[1, 2, 3],
+            alpha=2.0,
+            concept="positivity",
+            extraction_method="pca",
+        )
+        d = rec.to_dict()
+        self.assertEqual(d["model_name"], "gpt2")
+        self.assertEqual(d["layers"], [1, 2, 3])
+        self.assertEqual(d["alpha"], 2.0)
+
+    def test_to_json(self):
+        from src.experiment_tracker import ExperimentRecord
+        rec = ExperimentRecord(model_name="gpt2", concept="test")
+        j = rec.to_json()
+        parsed = json.loads(j)
+        self.assertEqual(parsed["model_name"], "gpt2")
+
+
+class TestExperimentTracker(unittest.TestCase):
+    """Validate ExperimentTracker SQLite operations."""
+
+    def setUp(self):
+        # Use a temp DB for tests
+        self.db_path = os.path.join(tempfile.mkdtemp(), "test_experiments.db")
+        from src.experiment_tracker import ExperimentTracker, ExperimentRecord
+        self.tracker = ExperimentTracker(db_path=self.db_path)
+        self.ExperimentRecord = ExperimentRecord
+
+    def tearDown(self):
+        try:
+            os.remove(self.db_path)
+        except OSError:
+            pass
+
+    def _make_record(self, **kwargs):
+        defaults = dict(
+            model_name="gpt2",
+            layers=[6, 7, 8],
+            alpha=2.0,
+            weight_strategy="uniform",
+            concept="safety",
+            extraction_method="mean_diff",
+            prompt="test prompt",
+            baseline_text="baseline output",
+            steered_text="steered output",
+            ppl_baseline=10.0,
+            ppl_steered=12.0,
+            delta_ppl=2.0,
+            ppl_ratio=1.2,
+            cosine_sim=0.95,
+            kl_divergence=0.05,
+            js_divergence=0.03,
+            entropy_baseline=3.0,
+            entropy_steered=3.5,
+            steering_strength_score=0.15,
+            runtime_ms=150.0,
+            cpu_memory_mb=512.0,
+            gpu_memory_mb=1024.0,
+        )
+        defaults.update(kwargs)
+        return self.ExperimentRecord(**defaults)
+
+    def test_log_and_get_experiment(self):
+        rec = self._make_record()
+        exp_id = self.tracker.log_experiment(rec)
+        self.assertEqual(exp_id, rec.experiment_id)
+
+        retrieved = self.tracker.get_experiment(exp_id)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.model_name, "gpt2")
+        self.assertEqual(retrieved.layers, [6, 7, 8])
+        self.assertAlmostEqual(retrieved.alpha, 2.0)
+
+    def test_get_nonexistent_returns_none(self):
+        self.assertIsNone(self.tracker.get_experiment("nonexistent-id"))
+
+    def test_count_experiments(self):
+        self.assertEqual(self.tracker.count_experiments(), 0)
+        self.tracker.log_experiment(self._make_record())
+        self.tracker.log_experiment(self._make_record())
+        self.assertEqual(self.tracker.count_experiments(), 2)
+
+    def test_list_experiments(self):
+        for i in range(5):
+            self.tracker.log_experiment(self._make_record(alpha=float(i)))
+        exps = self.tracker.list_experiments(limit=3)
+        self.assertEqual(len(exps), 3)
+
+    def test_list_with_filters(self):
+        self.tracker.log_experiment(self._make_record(concept="safety"))
+        self.tracker.log_experiment(self._make_record(concept="positivity"))
+        self.tracker.log_experiment(self._make_record(concept="safety"))
+
+        safety_exps = self.tracker.list_experiments(concept_filter="safety")
+        self.assertEqual(len(safety_exps), 2)
+
+        positivity_exps = self.tracker.list_experiments(concept_filter="positivity")
+        self.assertEqual(len(positivity_exps), 1)
+
+    def test_delete_experiment(self):
+        rec = self._make_record()
+        self.tracker.log_experiment(rec)
+        self.assertTrue(self.tracker.delete_experiment(rec.experiment_id))
+        self.assertIsNone(self.tracker.get_experiment(rec.experiment_id))
+
+    def test_delete_nonexistent_returns_false(self):
+        self.assertFalse(self.tracker.delete_experiment("nonexistent"))
+
+    def test_compare_experiments(self):
+        ids = []
+        for i in range(3):
+            rec = self._make_record(alpha=float(i))
+            self.tracker.log_experiment(rec)
+            ids.append(rec.experiment_id)
+
+        compared = self.tracker.compare_experiments(ids[:2])
+        self.assertEqual(len(compared), 2)
+
+    def test_compare_empty_list(self):
+        self.assertEqual(self.tracker.compare_experiments([]), [])
+
+    def test_get_unique_values(self):
+        self.tracker.log_experiment(self._make_record(concept="safety"))
+        self.tracker.log_experiment(self._make_record(concept="positivity"))
+        self.tracker.log_experiment(self._make_record(concept="safety"))
+
+        uniques = self.tracker.get_unique_values("concept")
+        self.assertIn("safety", uniques)
+        self.assertIn("positivity", uniques)
+        self.assertEqual(len(uniques), 2)
+
+    def test_get_unique_values_invalid_column(self):
+        with self.assertRaises(ValueError):
+            self.tracker.get_unique_values("nonexistent_column")
+
+    def test_export_json(self):
+        self.tracker.log_experiment(self._make_record())
+        self.tracker.log_experiment(self._make_record())
+        out_path = os.path.join(os.path.dirname(self.db_path), "export.json")
+        result = self.tracker.export_experiments_json(out_path)
+        self.assertTrue(os.path.exists(result))
+        with open(result, "r") as f:
+            data = json.load(f)
+        self.assertEqual(len(data), 2)
+
+    def test_export_csv(self):
+        self.tracker.log_experiment(self._make_record())
+        out_path = os.path.join(os.path.dirname(self.db_path), "export.csv")
+        result = self.tracker.export_experiments_csv(out_path)
+        self.assertTrue(os.path.exists(result))
+
+
+class TestExperimentTrackerHelpers(unittest.TestCase):
+    """Validate helper functions."""
+
+    def test_get_git_commit_returns_string(self):
+        from src.experiment_tracker import get_git_commit
+        result = get_git_commit()
+        self.assertIsInstance(result, str)
+
+    def test_get_system_memory_returns_tuple(self):
+        from src.experiment_tracker import get_system_memory
+        cpu, gpu = get_system_memory()
+        self.assertIsInstance(cpu, float)
+        self.assertIsInstance(gpu, float)
+        self.assertGreaterEqual(cpu, 0.0)
+        self.assertGreaterEqual(gpu, 0.0)
+
+
+class TestExperimentTrackerPlotting(unittest.TestCase):
+    """Validate experiment plotting utilities."""
+
+    def _make_records(self, n=3):
+        from src.experiment_tracker import ExperimentRecord
+        records = []
+        for i in range(n):
+            records.append(ExperimentRecord(
+                model_name="gpt2",
+                layers=[6, 7],
+                alpha=float(i + 1),
+                concept="safety",
+                extraction_method="pca",
+                ppl_ratio=1.0 + 0.1 * i,
+                cosine_sim=0.9 - 0.05 * i,
+                kl_divergence=0.01 * (i + 1),
+                js_divergence=0.005 * (i + 1),
+                steering_strength_score=0.1 * (i + 1),
+                entropy_baseline=3.0,
+                entropy_steered=3.0 + 0.2 * i,
+            ))
+        return records
+
+    def test_plot_experiment_timeline(self):
+        from src.experiment_tracker import plot_experiment_timeline
+        fig = plot_experiment_timeline(self._make_records())
+        self.assertIsNotNone(fig)
+
+    def test_plot_experiment_comparison(self):
+        from src.experiment_tracker import plot_experiment_comparison
+        fig = plot_experiment_comparison(self._make_records(), metric="ppl_ratio")
+        self.assertIsNotNone(fig)
+
+    def test_plot_experiment_comparison_custom_metric(self):
+        from src.experiment_tracker import plot_experiment_comparison
+        fig = plot_experiment_comparison(self._make_records(), metric="cosine_sim")
+        self.assertIsNotNone(fig)
+
+    def test_plot_experiment_radar(self):
+        from src.experiment_tracker import plot_experiment_radar
+        fig = plot_experiment_radar(self._make_records())
+        self.assertIsNotNone(fig)
 
 
 if __name__ == "__main__":
