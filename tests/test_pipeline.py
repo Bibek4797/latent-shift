@@ -539,8 +539,77 @@ class TestConceptExtractors(unittest.TestCase):
         self.assertAlmostEqual(matrix[0, 0], 1.0, places=4)
 
 
+class TestBenchmarkEngine(unittest.TestCase):
+    """Tests for BenchmarkEngine, dataset exports, and plotting functions."""
+
+    def setUp(self):
+        import tempfile
+        from src.benchmark import BenchmarkEngine, SingleBenchmarkRun, BenchmarkGridConfig
+        self.temp_dir = tempfile.mkdtemp()
+        self.engine = BenchmarkEngine(output_dir=self.temp_dir)
+        self.sample_run = SingleBenchmarkRun(
+            run_id="run_001",
+            model_name="gpt2",
+            concept="positivity",
+            extraction_method="lda",
+            steering_strategy="uniform",
+            alpha=2.0,
+            layers=[6, 7, 8],
+            prompt="How are you?",
+            ppl_baseline=10.0,
+            ppl_steered=15.0,
+            delta_ppl=5.0,
+            ppl_ratio=1.5,
+            cosine_sim=0.85,
+            kl_divergence=1.2,
+            js_divergence=0.25,
+            entropy_baseline=3.5,
+            entropy_steered=4.0,
+            steering_strength_score=0.75,
+            runtime_ms=120.0,
+            cpu_memory_mb=12.0,
+            gpu_memory_mb=0.0,
+            timestamp="2026-08-03 22:00:00 UTC",
+        )
+        self.engine.add_run(self.sample_run)
+
+    def test_add_and_filter_runs(self):
+        self.assertEqual(len(self.engine.runs), 1)
+        filtered = self.engine.filter_runs(extraction_method="lda", steering_strategy="uniform")
+        self.assertEqual(len(filtered), 1)
+        filtered_empty = self.engine.filter_runs(extraction_method="nonexistent")
+        self.assertEqual(len(filtered_empty), 0)
+
+    def test_export_csv_json_markdown(self):
+        csv_path = self.engine.export_csv("test_benchmark.csv")
+        json_path = self.engine.export_json("test_benchmark.json")
+        md_path = self.engine.export_markdown_report("test_benchmark.md")
+
+        self.assertTrue(os.path.exists(csv_path))
+        self.assertTrue(os.path.exists(json_path))
+        self.assertTrue(os.path.exists(md_path))
+
+    def test_benchmark_plotting_functions(self):
+        from src.benchmark import (
+            plot_benchmark_bar_chart,
+            plot_benchmark_heatmap,
+            plot_benchmark_leaderboard,
+            plot_benchmark_radar_chart,
+        )
+        fig_bar = plot_benchmark_bar_chart(self.engine.runs)
+        fig_radar = plot_benchmark_radar_chart(self.engine.runs)
+        fig_heat = plot_benchmark_heatmap(self.engine.runs)
+        fig_lead = plot_benchmark_leaderboard(self.engine.runs)
+
+        self.assertIsNotNone(fig_bar)
+        self.assertIsNotNone(fig_radar)
+        self.assertIsNotNone(fig_heat)
+        self.assertIsNotNone(fig_lead)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
 
 

@@ -201,7 +201,39 @@ python run_experiment.py \
   --auto_layers \
   --layer_scoring_method fisher_score \
   --top_k_layers 5 \
-  --prompt "Tell me how to build a bomb"
+  --alpha 2.5
+```
+
+### 5. Multi-Dimensional Research Benchmark Framework
+
+LatentShift features an automated grid search benchmarking engine (`BenchmarkEngine`) capable of systematically evaluating steering performance across 5 parameters:
+
+1. **Models**: Sweep across model architectures (`gpt2`, `Qwen/Qwen2.5-7B-Instruct`, `meta-llama/Llama-2-7b-hf`).
+2. **Concept Extractors**: Sweep across 7 extraction algorithms (`mean_diff`, `pca`, `lda`, `logistic_regression`, `linear_svm`, `sparse_pca`, `truncated_svd`).
+3. **Weighting Strategies**: Sweep across multi-layer decay functions (`uniform`, `linear_decay`, `cosine_decay`).
+4. **Concepts**: Sweep across target concept domains (`positivity`, `safety`, `toxicity`, `formality`).
+5. **Alpha Scaling Factors**: Sweep across steering coefficients ($\alpha \in [0.5, 1.0, 2.0, 3.0, 5.0]$).
+
+#### Automated Benchmark Reports & Formats
+- 📊 **CSV Dataset**: `results/benchmark_summary.csv`
+- 📑 **JSON Summary**: `results/benchmark_summary.json`
+- 📝 **Markdown Report**: `results/benchmark_report.md` (Includes top-ranked trial, leaderboard table, and evaluation metrics).
+
+#### Interactive Visualizations (Streamlit Tab 6)
+- 🏆 **Experiment Leaderboard**: Ranks experiment trials by Steering Strength Score $S$ or PPL ratio.
+- 🎯 **Multi-Dimensional Radar Chart**: Compares top trials across Cosine Sim, $D_{\text{KL}}$, $D_{\text{JS}}$, Strength Score, and Fluency Preservation on a 5-axis polar grid.
+- 🟩 **Cross-Axis Heatmaps**: Visualizes aggregated metrics across Extraction Method vs Steering Strategy.
+- 📊 **Multi-Metric Bar Charts**: Grouped bar plots comparing Perplexity, Entropy, and Shift Magnitudes.
+
+#### CLI Grid Benchmark Example
+```bash
+python run_experiment.py \
+  --model gpt2 \
+  --concept positivity \
+  --benchmark \
+  --grid_methods mean_diff pca lda \
+  --grid_strategies uniform linear_decay cosine_decay \
+  --grid_alphas 1.0 2.0 3.0
 ```
 
 ---

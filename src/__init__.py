@@ -1,5 +1,14 @@
 """LatentShift — src package."""
 
+from src.benchmark import (
+    BenchmarkEngine,
+    BenchmarkGridConfig,
+    SingleBenchmarkRun,
+    plot_benchmark_bar_chart,
+    plot_benchmark_heatmap,
+    plot_benchmark_leaderboard,
+    plot_benchmark_radar_chart,
+)
 from src.compute import ConceptVectorEngine
 from src.concept_extractors import (
     EXTRACTOR_REGISTRY,
@@ -46,6 +55,9 @@ __all__ = [
     "EXTRACTOR_REGISTRY",
     "ConceptVectorComparer",
     "ExtractorBenchmarkResult",
+    "BenchmarkEngine",
+    "SingleBenchmarkRun",
+    "BenchmarkGridConfig",
     "plot_layerwise_changes",
     "plot_metric_comparison",
     "plot_steering_strength",
@@ -56,11 +68,16 @@ __all__ = [
     "plot_runtime_comparison",
     "plot_memory_comparison",
     "plot_vector_magnitude_comparison",
+    "plot_benchmark_bar_chart",
+    "plot_benchmark_radar_chart",
+    "plot_benchmark_heatmap",
+    "plot_benchmark_leaderboard",
     "compute_layer_weights",
     "get_logger",
     "set_seed",
     "normalize_vector",
 ]
+
 
 
 

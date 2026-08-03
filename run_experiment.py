@@ -224,7 +224,34 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to save JSON results. Defaults to results/<concept>_<timestamp>.json",
     )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Run multi-experiment grid sweep benchmarking across methods, strategies, and alphas.",
+    )
+    parser.add_argument(
+        "--grid_methods",
+        type=str,
+        nargs="+",
+        default=["mean_diff", "pca", "lda"],
+        help="Extraction methods to sweep over in benchmark mode.",
+    )
+    parser.add_argument(
+        "--grid_strategies",
+        type=str,
+        nargs="+",
+        default=["uniform", "linear_decay", "cosine_decay"],
+        help="Weighting strategies to sweep over in benchmark mode.",
+    )
+    parser.add_argument(
+        "--grid_alphas",
+        type=float,
+        nargs="+",
+        default=[1.0, 2.0, 3.0],
+        help="Alpha scaling values to sweep over in benchmark mode.",
+    )
     return parser.parse_args()
+
 
 
 def main() -> None:
@@ -310,8 +337,98 @@ def main() -> None:
     )
     logger.info("Concept vectors saved to: %s", saved_path)
 
-    # ---- Comparative Generation --------------------------------------------
     generator = SteeredGenerator(model, tokenizer, config.device)
+
+    # ---- Benchmark Grid Sweep Mode ----------------------------------------
+    if args.benchmark:
+        logger.info("Executing Multi-Dimensional Research Benchmark Grid Sweep...")
+        from src.benchmark import BenchmarkEngine, SingleBenchmarkRun
+
+        benchmark_engine = BenchmarkEngine(output_dir="results")
+
+        trial_idx = 0
+        total_trials = len(args.grid_methods) * len(args.grid_strategies) * len(args.grid_alphas)
+        logger.info("Total grid search combinations: %d", total_trials)
+
+        for m in args.grid_methods:
+            c_vectors = {}
+            for layer in args.layers:
+                c_vectors[layer] = ConceptVectorEngine.compute_vector(
+                    m, pos_acts[layer], neg_acts[layer], normalize=args.normalize
+                )
+
+            for strat in args.grid_strategies:
+                for a in args.grid_alphas:
+                    trial_idx += 1
+                    logger.info(
+                        "[%d/%d] Benchmarking trial: method=%s | strategy=%s | alpha=%.2f",
+                        trial_idx, total_trials, m, strat, a
+                    )
+                    start_t = time.perf_counter()
+                    b_txt, s_txt = generator.generate_comparative(
+                        prompt=args.prompt,
+                        vectors=c_vectors,
+                        alpha=a,
+                        strategy=strat,
+                        max_new_tokens=args.max_new_tokens,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                        seed=args.seed,
+                    )
+                    runtime_ms = (time.perf_counter() - start_t) * 1000.0
+
+                    mid_l = args.layers[len(args.layers) // 2]
+                    report = SteeringEvaluator.evaluate_full(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompt=args.prompt,
+                        baseline_text=b_txt,
+                        steered_text=s_txt,
+                        concept_vector=c_vectors[mid_l],
+                        device=config.device,
+                    )
+
+                    run_item = SingleBenchmarkRun(
+                        run_id=f"run_{trial_idx:03d}",
+                        model_name=args.model,
+                        concept=args.concept,
+                        extraction_method=m,
+                        steering_strategy=strat,
+                        alpha=a,
+                        layers=args.layers,
+                        prompt=args.prompt,
+                        ppl_baseline=report.ppl_baseline,
+                        ppl_steered=report.ppl_steered,
+                        delta_ppl=report.delta_ppl,
+                        ppl_ratio=report.ppl_ratio,
+                        cosine_sim=report.cosine_sim,
+                        kl_divergence=report.kl_divergence,
+                        js_divergence=report.js_divergence,
+                        entropy_baseline=report.entropy_baseline,
+                        entropy_steered=report.entropy_steered,
+                        steering_strength_score=report.steering_strength_score,
+                        runtime_ms=round(runtime_ms, 2),
+                        cpu_memory_mb=round(sys.getsizeof(report) / 1024.0, 2),
+                        gpu_memory_mb=0.0 if not torch.cuda.is_available() else round(torch.cuda.max_memory_allocated() / (1024.0 * 1024.0), 2),
+                        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    )
+                    benchmark_engine.add_run(run_item)
+
+        csv_path = benchmark_engine.export_csv()
+        json_path = benchmark_engine.export_json()
+        md_path = benchmark_engine.export_markdown_report()
+
+        print("\n" + "=" * 60)
+        print("BENCHMARK GRID SWEEP COMPLETE")
+        print("=" * 60)
+        print(f"Total Trials Executed : {len(benchmark_engine.runs)}")
+        print(f"CSV Report Saved      : {csv_path}")
+        print(f"JSON Export Saved     : {json_path}")
+        print(f"Markdown Summary Saved: {md_path}")
+        print("=" * 60)
+        return
+
+    # ---- Comparative Generation --------------------------------------------
     logger.info("Running comparative generation...")
     baseline, steered = generator.generate_comparative(
         prompt=args.prompt,
@@ -323,6 +440,7 @@ def main() -> None:
         top_p=args.top_p,
         seed=args.seed,
     )
+
 
 
     # ---- Evaluation --------------------------------------------------------
