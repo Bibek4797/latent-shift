@@ -58,9 +58,9 @@ def main():
 
     print("\n" + "=" * 60)
     print(f"Prompt: '{prompt}'\n")
-    print(f"🔮 Cosine Scheduler Output:\n{text_cos}")
+    print(f"[STEERED - Cosine Scheduler Output]:\n{text_cos}")
     print(f"  Alpha Trajectory Summary: {traj_cos.to_dict()}\n")
-    print(f"🔮 Entropy Scheduler Output:\n{text_ent}")
+    print(f"[STEERED - Entropy Scheduler Output]:\n{text_ent}")
     print(f"  Alpha Trajectory Summary: {traj_ent.to_dict()}")
     print("=" * 60)
 

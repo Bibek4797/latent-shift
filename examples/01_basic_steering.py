@@ -71,8 +71,8 @@ def main():
     )
 
     print("\n" + "=" * 50)
-    print(f"⚪ BASELINE:\n{baseline}\n")
-    print(f"🔮 STEERED (alpha=2.5):\n{steered}")
+    print(f"[BASELINE]:\n{baseline}\n")
+    print(f"[STEERED] (alpha=2.5):\n{steered}")
     print("=" * 50)
 
 

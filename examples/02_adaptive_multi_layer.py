@@ -63,8 +63,8 @@ def main():
 
     print("\n" + "=" * 50)
     print(f"Prompt: '{prompt}'")
-    print(f"⚪ BASELINE:\n{baseline}\n")
-    print(f"🔮 STEERED (Cosine Decay, alpha=3.0):\n{steered}")
+    print(f"[BASELINE]:\n{baseline}\n")
+    print(f"[STEERED] (Cosine Decay, alpha=3.0):\n{steered}")
     print("=" * 50)
 
 
