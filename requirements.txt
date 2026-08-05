@@ -5,8 +5,8 @@ torch>=2.1.0
 transformers>=4.40.0
 accelerate>=0.28.0
 
-# Quantization (optional, CUDA only)
-bitsandbytes>=0.43.0
+# Quantization (optional, CUDA only — comment out for CPU/Streamlit Cloud builds)
+# bitsandbytes>=0.43.0
 
 # Concept vector computation
 scikit-learn>=1.3.0
